@@ -1,10 +1,28 @@
 # Sup?
 
-Everyone likes AI/ML/GLSL so let's have an AI/ML/GLSL party up in here!
+Everyone likes AI/ML/GLSL so let's have an AI/ML/GLSL party up in here! 🎉🥳🎊🎁
 
 I'm using 3.10.10 with pyenv. You should find all goodies in requirements.txt
 
-# Train the model
+See it in action on [shadertoy#WXsGWN](https://www.shadertoy.com/view/WXsGWN), the loss there was under .004.
+And took about an hour to train.
+
+## (Quick) Training Example 🏋️‍♂️
+
+This is a quick run to show for now: ![training output image](run/training-2025-03-26_19-59-54/images/output.png) which only ran a few minutes with a loss of 0.006454
+
+![training](run/training-2025-03-26_19-59-54/training.gif)
+
+I'm running a longer training now (about 2 hours) to see if more time will make much difference.
+
+After that I will try more experiments with the training code itself probaby following a few ideas:
+1. better image pre-processing
+2. varying the test inputs
+3. changing around the loss function
+4. tweaks to the training method 
+5. try it on different images
+
+# Train the model 🏋🏽🔥💪🏼🎧
 
 All you need is the input image. Here is an example specifying some output files as well
 
