@@ -6,7 +6,7 @@ _run_training_main() {
 	local file=${1-images/lenna.png}
 
 	# this is roughly 1 minute per
-	local training=60
+	local training=1
 
 	file=$(fullpath ${file})
 	if [ ! -f ${file} ] ; then
@@ -38,6 +38,8 @@ _run_training_main() {
 		2>&1 | tee train.log || return ${?}
 
 	echo "Training completed"
+
+	../../translate.py weights.npz > output.glsl
 
 	ls -lathr ${dir}/*.*
 
