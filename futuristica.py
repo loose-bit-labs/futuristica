@@ -33,6 +33,7 @@ class MLP(torch.nn.Module):
             torch.nn.Linear(16, 16), torch.nn.ReLU(),
             torch.nn.Linear(16, 16), torch.nn.ReLU(),
             torch.nn.Linear(16, 16), torch.nn.ReLU(),
+            torch.nn.Linear(16, 3), torch.nn.ReLU(),
         )
 
     def forward(self, x):
