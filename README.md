@@ -74,7 +74,7 @@ I wrote it cuz it's nifty.
 
 To run the support scripts you'll need some tools installed or to edit them to use your preffered
 
-I use an crusty program called "xv" which you can replace with any thing else that can display a png.
+I use an ancient, crusty program called "xv" which you can replace with any thing else that can display a png.
 
 The `historic-output.sh` script has a bit more odds and ends in addition to "xv":
 - ffmpeg, to create an mp4 from the training output videos
