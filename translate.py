@@ -4,11 +4,12 @@
 import argparse
 import numpy as np
 
-
 class Translate:
     def main(self):
         parser = argparse.ArgumentParser(description="Translate weights to GLSL")
         parser.add_argument('filename')
+        parser.add_argument("--coding", type=int, default=2)
+
         args = parser.parse_args()
 
         data = np.load(args.filename);
@@ -28,7 +29,7 @@ class Translate:
                     i = i + 1
         print("")
 
-        maxo = 1
+        workspace_size = 1
 
         names = []
         current = None
@@ -44,34 +45,67 @@ class Translate:
             n = 1
             for size in entry.shape:
                 n = n * size
-            if n > maxo:
-                maxo =n
+                workspace_size = max(workspace_size, size)
             values = ",".join(map(lambda x: "{:.2f}".format(x).replace("0.", "."), entry.flatten()))
-            #print(",".join(map(lambda x: "{:.2f}".format(x).replace("0.", "."), entry.flatten())))
             print(f"const float {name}[] = float[{n}]({values});");
-            #print(",".join(map("{:.4f}".format, entry.flatten())))
-            #print(f");")
         print("")
 
-        workspace = ",".join([".0"] * maxo)
+        workspace = ",".join([".0"] * workspace_size)
         for i in range(0,2):
-            print(f"float WORKSPACE{i+1}[] = float[{maxo}]({workspace});");
+            print(f"float WORKSPACE{i+1}[{workspace_size}];"); # = float[{workspace_size}]({workspace});");
+
+        if args.coding > 0:
+            print(f"float encoded[{2 + 4 * args.coding}];")
 
         print("");
+        
+        w1 = "WORKSPACE1"
+        w2 = "WORKSPACE2"
 
-        print("vec3 mlp(vec2 x) {")
-        print("\tvec3 q = vec3(.0);")
+        src = "p";
+        dst = w1
 
-        src = "x";
-        dst = "WORKSPACE1"
+        got_squares = True
+        if args.coding > 0:
+            print(f"void encoder(vec2 {src}) " + "{")
+            print("\tint index = 0;")
+            print("\t")
+            print("\t// Store original coordinates")
+            print("\tencoded[index++] = p.x;")
+            print("\tencoded[index++] = p.y;")
+            print("\t")
+            print(f"\tfor (int i = 0; i < {args.coding} ; i++) " + "{")
+            print("\t\tfloat freq = exp2(float(i)) * 3.14159265359;")
+            if got_squares:
+                print("\t\tif(1 == i %2) {")
+            print("\t\tencoded[index++] = sin(freq * p.x);")
+            print("\t\tencoded[index++] = sin(freq * p.y);")
+            print("\t\tencoded[index++] = cos(freq * p.x);")
+            print("\t\tencoded[index++] = cos(freq * p.y);")
+            if got_squares:
+                print("\t\t} else {")
+                print("\t\t\tfloat j = float(i)+.5;")
+                print("\t\t\tencoded[index++] = abs((exp2(float(i)) - 0.5) * p.x);")
+                print("\t\t\tencoded[index++] = abs((exp2(float(i)) - 0.5) * p.y);")
+                print("\t\t\tencoded[index++] = abs((exp2(float(j)) - 0.5) * p.x);")
+                print("\t\t\tencoded[index++] = abs((exp2(float(j)) - 0.5) * p.y);")
+                print("\t\t}")
+            print("\t}")
+            print("}\n")
 
+        print(f"vec3 nn(vec2 {src}) " + "{")
+        print("\tvec3 color = vec3(.0);")
+
+        if args.coding > 0:
+            print(f"\tencoder({src});");
+            src = "encoded"
+        
         index = 0
         for pair in names:
             weights = pair[0]
             bias    = pair[1]
             index   = 1 + index
             last = index == len(names)
-            
 
             print(f"\tfor (int i = 0; i < {weights}_0_SIZE ; i++) " + "{")
             print(f"\t\tfloat sum = {bias}[i];")
@@ -79,25 +113,25 @@ class Translate:
             print(f"\t\t\tsum += {src}[j] * {weights}[i * {weights}_1_SIZE + j];")
             print( "\t\t}")
             if last:
-                dst = "q"
-                print(f"\t\t{dst}[i] = 1.0 / (1.0 + exp(-sum)); // Sigmoid activation")
+                dst = "color"
+                print(f"\t\t{dst}[i] = sum; // 1.0 / (1.0 + exp(-sum)); // Sigmoid activation")
             else:
                 print(f"\t\t{dst}[i] = max(sum, 0.0); // ReLU activation") #  last needs to be sigmoid....
-                if src != "WORKSPACE1":
-                    src = "WORKSPACE1"
-                    dst = "WORKSPACE2"
+                if src != w1:
+                    src = w1
+                    dst = w2
                 else:
-                    dst = "WORKSPACE1"
-                    src = "WORKSPACE2"
+                    dst = w1
+                    src = w2
                 #src = "WORKSPACE"
             print( "\t}")
-        print("\treturn q;")
+        print("\treturn color;")
         print("}")
 
         print("");
         print("void mainImage(out vec4 to, in vec2 at) {");
         print("\tvec2 uv = (at * 2. - iResolution.xy)/iResolution.y * vec2(1.,-1.);");
-        print("\tto = vec4(mlp(uv), 1.); // 🤖");
+        print("\tto = vec4(nn(uv), 1.); // 🤖");
         print("}");
 # end-of class Translate
 
