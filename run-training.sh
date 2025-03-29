@@ -7,10 +7,9 @@ _run_training_main() {
 
 	local file=${1-images/lenna.png}
 
-	# translates into 1 minute each
+	# training 10 will take about 10 minutes
 	local training=10
 	local coding=3
-training=1
 
 	# this will allow you to reuse the output of a prior run
 	# be sure to use the abs
@@ -24,9 +23,9 @@ training=1
 		return  1
 	fi
 
-	if [ "" != "${ckp}"] ; then
+	if [ "" != "${ckp}" ] ; then
 		ckp=$(fullpath ${ckp})
-		if [ ! -f ${ckp} ] ; then
+		if [ ! -f "${ckp}" ] ; then
 			echo "where is this ${ckp} of which you speak?"
 			return  1
 		fi
