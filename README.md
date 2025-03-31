@@ -1,6 +1,6 @@
-# Sup? 🧠 📸🖼️
+# Salutations! 🧠 📸🖼️
 
-<img src="images/lenna.png" style="float:right" alt="training image"/>
+![training image](images/lenna.png)
 
 Everyone likes AI/ML/GLSL so let's have an AI/ML/GLSL party up in here! 🎉🥳🎊🎁
 
