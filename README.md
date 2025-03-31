@@ -7,21 +7,12 @@ I'm using 3.10.10 with pyenv. You should find all goodies in requirements.txt
 See it in action on [shadertoy#w3l3W4](https://www.shadertoy.com/view/w3l3W4), the loss there was under .004.
 And took about an hour to train.
 
-| Original                | Trained                     |
-|-------------------------|-----------------------------|
-| ![og](images/lenna.png) | ![nn](images/lenn-nn-a.png) |
-
 # Training Examples 🏋️‍♂️
 
-| Early Example                       | More Recent                      |
-|-------------------------------------|----------------------------------|
-| ![b4](images/examples/b4.gif)       | ![l8](images/examples/l8.gif)    |
-| ![b4](images/examples/b4.png)       | ![l8](images/examples/l8.png)    |
-| loss:.006588, no encoding, 1 minute | loss:.0037, endoding:3, 60m, ckp |
-
-Note the training series shown for the more recent is an earlier run that created the checkpoint show above.
-This is just because the checkpoint version shows very little change, indicating training had largely 
-plateued 
+| /        | Final                         | Training                      | Stats                              |
+|----------|-------------------------------|-------------------------------|------------------------------------|
+| Encoding | ![l8](images/examples/l8.png) | ![l8](images/examples/l8.gif) | loss:.003700, encoding:3, 60m, ckp |
+| Raw      | ![b4](images/examples/b4.png) | ![b4](images/examples/b4.gif) | loss:.006588, encoding:0, 10m      |
 
 ## Further Experiments
 
@@ -37,6 +28,7 @@ Here are some things I've tried or want to try or have failed to try:
 8. modify the model architecture (attention?)
 9. try smaller models
 10. conditioning
+11. more optimized generated code
 
 # Train the model 🏋🏽🔥💪🏼🎧
 
