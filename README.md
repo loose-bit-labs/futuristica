@@ -1,5 +1,7 @@
 # Sup? 🧠 📸🖼️
 
+<img src="images/lenna.png" style="float:right" alt="training image"/>
+
 Everyone likes AI/ML/GLSL so let's have an AI/ML/GLSL party up in here! 🎉🥳🎊🎁
 
 I'm using 3.10.10 with pyenv. You should find all goodies in requirements.txt
