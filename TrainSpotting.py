@@ -28,6 +28,7 @@ class Trainspotting:
     def __init__(self):
         self.parser = argparse.ArgumentParser(description="This is pythong")
         self.parser.add_argument("--sleep", type=int, default=10)
+        self.parser.add_argument("--scale", type=int, default=1)
         self.parser.add_argument("--dir",   type=str, default="last/images")
         self.images = {}
         self.pngs = []
@@ -37,7 +38,7 @@ class Trainspotting:
         Trainspotting.LOG.info(f'settings: {json.dumps(vars(args))}')
 
         tk_root = tk.Tk()
-        tk_root.title("TrainSpotting 🚂 👀")
+        tk_root.title(f"TrainSpotting 🚂 {self.args.dir} 👀")
         top_frame = Frame(tk_root)
         top_frame.pack(side="top")
 
@@ -60,12 +61,15 @@ class Trainspotting:
             elif self.current >= count:
                 self.current = count - 1
             name = self.pngs[self.current]
-            self.photo = self.images[name]
-            self.label.image = self.photo
-            self.label.config(image=self.photo)
-            text = f"{self.current + 1} of {count}: {name}"
-            print("SHOWING:", text, "and", name)
-            info.config(text = text)
+            if name in self.images:
+                self.photo = self.images[name]
+                self.label.image = self.photo
+                self.label.config(image=self.photo)
+                text = f"{self.current + 1} of {count}: {name}"
+                print("SHOWING:", text, "and", name)
+                info.config(text = text)
+            else:
+                print("derp")
 
         def key_press(event):
             print(f"Key pressed: {event.keysym}")
@@ -157,7 +161,9 @@ class Trainspotting:
             if png in self.images:
                 continue
             try:
-                self.images[png] = ImageTk.PhotoImage(Image.open(png))
+                image = Image.open(png)
+                image = image.resize((image.width * self.args.scale, image.height * self.args.scale))
+                self.images[png] = ImageTk.PhotoImage(image)#Image.open(png))
                 loaded = True
             except Exception as error:
                 pass
