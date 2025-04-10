@@ -11,26 +11,31 @@ And took about an hour to train.
 
 # Training Examples 🏋️‍♂️
 
-| ⛩️       | Final                         | Training                      | Stats                              |
-|----------|-------------------------------|-------------------------------|------------------------------------|
-| Encoding | ![l8](images/examples/l8.png) | ![l8](images/examples/l8.gif) | loss:.003700, encoding:3, 60m, ckp |
-| Raw      | ![b4](images/examples/b4.png) | ![b4](images/examples/b4.gif) | loss:.006588, encoding:0, 10m      |
+| ⛩️       | Final                         | Training                      | Stats                                |
+|----------|-------------------------------|-------------------------------|--------------------------------------|
+| E16      | ![lF](images/examples/lF.png) | ![lF](images/examples/lF.gif) | loss:.000383, new endocing, long run |
+| Encoding | ![l8](images/examples/l8.png) | ![l8](images/examples/l8.gif) | loss:.003700, encoding:3, 60m, ckp   |
+| Raw      | ![b4](images/examples/b4.png) | ![b4](images/examples/b4.gif) | loss:.006588, encoding:0, 10m        |
+
+The "E16" encoding using a 2d -> 16d enociding 
+
+In terms of generated code, using a 16 layer wide model with 4 layers seems to be the sweet spot...
 
 ## Further Experiments
 
 Here are some things I've tried or want to try or have failed to try:
 
-1. better image pre-processing (x)
-2. varying the test inputs (/)
-3. changing around the loss function (/)
-4. tweaks to the training method  (/)
-5. try it on different images (/)
-6. add ability t reload weights from a prior run (/)
-7. train the encoder instead of having a static method
-8. modify the model architecture (attention?)
-9. try smaller models
-10. conditioning
-11. more optimized generated code
+1.  better image pre-processing (x)
+2.  varying the test inputs (/)
+3.  changing around the loss function (/)
+4.  tweaks to the training method  (/)
+5.  try it on different images (/)
+6.  add ability t reload weights from a prior run (/)
+7.  train the encoder instead of having a static method
+8.  modify the model architecture (attention?)
+9.  try smaller models (/)
+10. conditioning (?)
+11. more optimized generated code (/)
 
 # Train the model 🏋🏽🔥💪🏼🎧
 
@@ -76,6 +81,11 @@ you deal with the dependencies, but training should still work.
 Note: it will also create a symbolic link from the main directory to
 the latest training run for convenience / laziness.
 
+Note: futuristica.py now has matlib integration to show realtime plot and most recent image,
+so you may not see much use in the helpers.
+
+You can use TrainSpotting.py but it can be buggy cuz tk is buggy.
+
 The script `historic-output.sh` will 
 - look at the output png's from training
 - display the latest one
@@ -92,3 +102,9 @@ I use an ancient, crusty program called "xv" which you can replace with any thin
 The `historic-output.sh` script has a bit more odds and ends in addition to "xv":
 - ffmpeg, to create an mp4 from the training output videos
 - mplayer to display the mp4
+
+# Further Reading
+
+https://medium.com/deepfail/implementing-jpeg-compression-in-pytorch-b0a830889f59
+https://pytorch.org/tutorials/intermediate/transformer_building_blocks.html
+https://www.geeksforgeeks.org/pytorch-loss-functions/
