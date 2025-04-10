@@ -4,6 +4,15 @@
 import argparse
 import numpy as np
 
+## 
+ #
+ # Takes a generated weight file and generates the GLSL
+ # code for shadertoy. 
+ #
+ # If you are using 16 model_size use -s to generate the 
+ # mat4 version which runs much nicer
+ #
+ ##
 class Translate:
     def main(self):
         parser = argparse.ArgumentParser(description="Translate weights to GLSL")
@@ -27,11 +36,7 @@ class Translate:
             #self.arrrrrrrr(args, data, workspace_size, names, sizes, values)
             self.innie(args, data, workspace_size, names, sizes, values)
 
-
-        print("void mainImage(out vec4 to, in vec2 at) {")
-        print("\tvec2 uv = (at * 2. - iResolution.xy)/iResolution.y * vec2(1.,-1.);")
-        print("\tif (iFrame<33) to = vec4(nn(uv), 1.); else discard; // 🤖")
-        print("}")
+        self.make_main()
     #end of main
 
 
@@ -358,7 +363,7 @@ class Translate:
         
         self.color_back(args)
         print("}")
-    #end of my_sweetie
+    # end of my_sweetie (just in code)
 
     def dodod(self, a, values_weights, i):
         s = ""
@@ -370,7 +375,31 @@ class Translate:
                 cc = ","
             s += "))"
         return s
+    # end of dodo
 
+    def make_main(self):
+        #print("void mainImage(out vec4 to, in vec2 at) {")
+        #print("\tvec2 uv = (at * 2. - iResolution.xy)/iResolution.y * vec2(1.,-1.);")
+        #print("\tif (iFrame<33) to = vec4(nn(uv), 1.); else discard; // 🤖")
+        #print("}")
+
+        print("void mainImage(out vec4 to, in vec2 at) {")
+        print("\tvec2 current_rz = iResolution.xy / 2048.;")
+        print("\tvec2 old_rz = texelFetch(iChannel0, ivec2(0), 0 ).xy;")
+        print("\tfloat d = distance(current_rz, old_rz);")
+        print("\tif (d<.11) {")
+        print("\t\tto =  texelFetch(iChannel0, ivec2(at), 0 );")
+        print("\t} else {")
+        print("\t\tivec2 i = ivec2(at);")
+        print("\t\tif (0 == i.x && 0 == i.y) {")
+        print("\t\t\tto.xy = current_rz;")
+        print("\t\t} else {")
+        print("\t\t\tvec2 uv = (at * 2. - iResolution.xy) / iResolution.y * vec2(1.,-1.);")
+        print("\t\t\tto = vec4(nn(uv), 1.);")
+        print("\t\t}")
+        print("\t }")
+        print("}")
+    # end of make_main
         
 
 # end-of class Translate
