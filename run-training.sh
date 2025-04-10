@@ -7,16 +7,37 @@ _run_training_main() {
 
 	local file=${1-images/lenna.png}
 
-	# training 10 will take about 10 minutes
-	local training=10
-	local coding=3
+	# how long to run
+	local training=22
+
+	# this is the image size, it will scale up or down too
+	local size=512
+
+	# other options: rgb and yuv, ycbcr seem to work best "in general"
+ 	local colorspace="ycbcr"
+
+	# this seems to be best but you can try the others
+	# these seem to work best: mse l1 huber bce klDiv
+ 	local loss_fn="mse"
+
+	# recommend using 16 (wide), 
+	# more than 4 layers and the glsl can be heavy on mobile, etc
+	local model_size=16
+	local model_count=4
 
 	# this will allow you to reuse the output of a prior run
-	# be sure to use the abs
 	local ckp="futuristica.npz"
 
-	########################################################################################
+	# use this if you want to start fresh
+ 	local ckp="" 
 
+	# no longer suggest changing this... 3 is dialed in now to 
+	# encode vec2 (2d) to mat4 (16d) but go nuts!
+
+	local coding=3 
+
+	########################################################################################
+	
 	file=$(fullpath ${file})
 	if [ ! -f ${file} ] ; then
 		echo "where is this ${file} of which you speak?"
@@ -51,24 +72,29 @@ _run_training_main() {
 
 	echo "Starting training"
 
-    time ../../futuristica.py \
-		--weights   weights.npz \
-		--generated images/output.png \
-		--coding    ${coding} \
-		--training  ${training} \
-		--image     ${file} \
-		--ckp       ${ckp} \
+    time ../../futuristica.py          \
+		--weights     weights.npz       \
+		--generated   images/output.png \
+		--loss_fn     ${loss_fn}   	   \
+		--coding      ${coding}         \
+		--training    ${training}       \
+		--size        ${size}           \
+		--image       ${file}           \
+		--colorspace  ${colorspace}     \
+		--ckp         "${ckp}"          \
+		--model_size  ${model_size}    \
+		--model_count ${model_count}   \
 		2>&1 | tee train.log || return ${?}
 	echo "Training completed"
 
-	../../translate.py --coding ${coding} weights.npz > output.glsl
+	# note: this -s only works of model_size 16, so change this if you change that... 
+	../../translate.py -s --coding ${coding} --colorspace ${colorspace} weights.npz > output.glsl
 
 	ls -lathr ${dir}/*.*
 
-	xv ${file} &
-	xv images/output.png &
-
 	echo "output is in ${PWD}"
+
+	cp -i weights.npz ../../zed.npz
 
 	########################################################################################
 }
