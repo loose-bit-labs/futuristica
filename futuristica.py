@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 # It seems like GLSL get's maxed out anything 32x32 or greater
 # Trying to go deep (giggetty)
 class Neuralistica(torch.nn.Module):
-    def __init__(self, input_size=2, output_size=3, hidden_size=11, hidden_count=5):
+    def __init__(self, input_size=16, output_size=3, hidden_size=16, hidden_count=4):
         super().__init__()
         layers = []
 
@@ -60,8 +60,8 @@ class Futuristica:
         self.parser.add_argument("--training",    type=int, default=20)
         self.parser.add_argument("--coding",      type=int, default=2)
         self.parser.add_argument("--ckp",         type=str)
-        self.parser.add_argument("--model_size",  type=int, default=11)
-        self.parser.add_argument("--model_count", type=int, default=5)
+        self.parser.add_argument("--model_size",  type=int, default=16)
+        self.parser.add_argument("--model_count", type=int, default=4)
         self.parser.add_argument("--loss_fn",     choices=losers, default="mse")
         self.parser.add_argument("--colorspace",  choices=["rgb", "ycbcr", "yuv"], default="ycbcr")
         self.parser.add_argument("--rollback_too_soon",     type=int, default=100)
