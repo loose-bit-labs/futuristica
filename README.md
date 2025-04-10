@@ -9,6 +9,8 @@ I'm using 3.10.10 with pyenv. You should find all goodies in requirements.txt
 See it in action on [shadertoy#w3l3W4](https://www.shadertoy.com/view/w3l3W4), the loss there was under .004.
 And took about an hour to train.
 
+The [shadertoy#WXjGzW](https://www.shadertoy.com/view/WXjGzW) is currently using the "E16" version
+
 # Training Examples 🏋️‍♂️
 
 | ⛩️       | Final                         | Training                      | Stats                                |
