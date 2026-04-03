@@ -19,7 +19,7 @@ The [shadertoy#WXjGzW](https://www.shadertoy.com/view/WXjGzW) is currently using
 
 | ⛩️       | Final                         | Training                      | Stats                                |
 |----------|-------------------------------|-------------------------------|--------------------------------------|
-| Siren    | ![sn](images/examples/sn.png) | ![sn](images/examples/sn.gif) | loss:.000674, claude siren and fixes |
+| Siren    | ![sn](images/examples/sn.png) | ![sn](images/examples/sn.gif) | loss:.000674, claude siren, 8x16     |
 | E16      | ![lF](images/examples/lF.png) | ![lF](images/examples/lF.gif) | loss:.000383, new encoding, long run |
 | Encoding | ![l8](images/examples/l8.png) | ![l8](images/examples/l8.gif) | loss:.003700, encoding:3, 60m, ckp   |
 | Raw      | ![b4](images/examples/b4.png) | ![b4](images/examples/b4.gif) | loss:.006588, encoding:0, 10m        |
