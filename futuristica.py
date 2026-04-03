@@ -18,32 +18,92 @@ from torchvision import models, transforms
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# Sine activation for SIREN networks.
+# omega_0 controls the frequency of the first layer — 30.0 is the value
+# from the original SIREN paper (Sitzmann et al. 2020) and works well in
+# practice. Hidden layers use omega_0=1.0 so they don't re-amplify.
+# In GLSL this is just: sin(sum) — single instruction, basically free.
+class SineActivation(torch.nn.Module):
+    def __init__(self, omega_0=30.0):
+        super().__init__()
+        self.omega_0 = omega_0
+
+    def forward(self, x):
+        return torch.sin(self.omega_0 * x)
+# end of class SineActivation
+
+
 # Define a simple neural network model
 # It seems like GLSL get's maxed out anything 32x32 or greater
-# 16x16 seems to work pretty well with 4 layers... 
+# 16x16 seems to work pretty well with 4 layers...
 # Sometimes I've tried 6 but it will probably be too much for smaller
 # webgl hardware (like mobile)
+#
+# activation choices:
+#   "relu"  — original behaviour, piecewise linear, bad at high frequencies
+#   "sine"  — SIREN: sin(omega_0 * x), excellent at high frequencies,
+#             requires siren_init() to be called after construction
+#   "tanh"  — smooth, better than relu for INRs but slower than sine
 class Neuralistica(torch.nn.Module):
-    def __init__(self, input_size=16, output_size=3, hidden_size=16, hidden_count=4):
+    def __init__(self, input_size=16, output_size=3, hidden_size=16, hidden_count=4, activation="sine"):
         super().__init__()
-        #print(f"Neuralistica model: input_size={input_size}, output_size={output_size}, hidden_size={hidden_size}, hidden_count={hidden_count})");
+        self.activation = activation
         self.fullness(input_size, output_size, hidden_size, hidden_count)
+        if activation == "sine":
+            self.siren_init()
     #end of __init__
+
+    def _make_activation(self, is_first=False):
+        if self.activation == "sine":
+            return SineActivation(omega_0=30.0 if is_first else 1.0)
+        elif self.activation == "tanh":
+            return torch.nn.Tanh()
+        else:  # relu — original behaviour
+            return torch.nn.ReLU()
 
     def fullness(self, input_size, output_size, hidden_size, hidden_count):
         layers = []
         layers.append(torch.nn.Linear(input_size, hidden_size))
-        layers.append(torch.nn.ReLU())
+        layers.append(self._make_activation(is_first=True))
         for _ in range(hidden_count):
             layers.append(torch.nn.Linear(hidden_size, hidden_size))
-            layers.append(torch.nn.ReLU())
+            layers.append(self._make_activation(is_first=False))
         layers.append(torch.nn.Linear(hidden_size, output_size))
-        layers.append(torch.nn.Sigmoid())
+        # No sigmoid on output — sine networks produce outputs in [-1,1]
+        # naturally. We clamp to [0,1] after. relu/tanh keep sigmoid for compat.
+        if self.activation != "sine":
+            layers.append(torch.nn.Sigmoid())
         self.layers = torch.nn.Sequential(*layers)
-
 
     def forward(self, x):
         return self.layers(x)
+
+    def siren_init(self, omega_0=30.0):
+        """
+        SIREN weight initialisation from Sitzmann et al. 2020.
+        Without this the sine network trains very poorly — the init scheme is
+        what makes SIREN actually work. Called automatically from __init__
+        when activation="sine".
+
+        First linear layer: uniform in [-1/fan_in, 1/fan_in]
+        Hidden linear layers: uniform in [-sqrt(6/fan_in)/omega_0, +sqrt(6/fan_in)/omega_0]
+
+        This preserves the distribution of activations across layers so that
+        the network can represent a wide range of frequencies from the start.
+        """
+        linear_idx = 0
+        for layer in self.layers:
+            if isinstance(layer, torch.nn.Linear):
+                n = layer.weight.shape[1]  # fan_in
+                if linear_idx == 0:
+                    # First layer — wider init so it spans the full input range
+                    torch.nn.init.uniform_(layer.weight, -1.0 / n, 1.0 / n)
+                else:
+                    bound = (6.0 / n) ** 0.5 / omega_0
+                    torch.nn.init.uniform_(layer.weight, -bound, bound)
+                linear_idx += 1
+    # end of siren_init
+
 # end of class Neuralistica
 
 
@@ -69,12 +129,11 @@ class Futuristica:
         self.parser.add_argument("-s", "--model_size",      type=int, default=16)
         self.parser.add_argument("-c", "--model_count",     type=int, default=4)
         self.parser.add_argument("-l", "--loss_fn",         choices=losers, default="mse")
+        self.parser.add_argument("-a", "--activation",      choices=["sine", "relu", "tanh"], default="sine")
+        self.parser.add_argument("-e", "--mapping",          choices=["polar", "fourier", "legacy"], default="polar")
         self.parser.add_argument("-k", "--colorspace",      choices=["rgb", "ycbcr", "yuv"], default="ycbcr")
-        self.parser.add_argument("-m", "--mechanism",       choices=["checker", "best", "og"], default="checker")
         self.parser.add_argument("-f", "--four",            action="store_true")
         self.parser.add_argument("-n", "--no_gui",          action="store_true")
-        self.parser.add_argument("--rollback_too_soon",     type=int, default=100)
-        self.parser.add_argument("--rollback_way_too_long", type=int, default=500)
         self.parser.add_argument("--steps",                 type=int, default=0)
     # end of __init__
 
@@ -106,8 +165,6 @@ class Futuristica:
         img = Image.open(image_path).convert("RGB")
         img = img.resize((size, size))  # Resize to speed up training
         img_data = np.array(img) / 255.0  # Convert to NumPy array and normalize
-        # this is terrible: img_data = np.power(img_data, 2.2)  # Apply gamma correction
-
         if self.args.four:
             mean_rgb = np.mean(img_data.reshape(-1, 3), axis=1, keepdims=True)  # (h*w, 1)
         else:
@@ -133,12 +190,8 @@ class Futuristica:
         if not mean_rgb is None:
             colors = np.concatenate([colors, mean_rgb], axis=1)  # (h*w, 4)
 
-        #if self.args.four:
-        #    mean_rgb = np.mean(colors, axis=1, keepdims=True)  # (h*w, 1)
-        #    colors = np.concatenate([colors, mean_rgb], axis=1)  # (h*w, 4)
-
         if self.args.coding > 0:
-            coords = self.positional_encoding(coords, L=self.args.coding) #10)
+            coords = self.positional_encoding(coords, L=self.args.coding, mapping=self.args.mapping)
 
         # Move data to GPU
         return (torch.tensor(coords, dtype=torch.float32, device=self.device), 
@@ -146,27 +199,26 @@ class Futuristica:
     # end of load_image
 
 
-    # TODO: make a training flag
     def train(self, coords, colors):
-        if "best" == self.args.mechanism:
-            return self.best_of_train(coords, colors)
-        if "og" == self.args.mechanism:
-            return self.og_train(coords, colors)
         return self.train_back(coords, colors)
     # end of train
 
 
-    def create_model(self):
-        input_size = 2 * 2 + self.args.coding * 4 
+    def create_model(self, first=True):
+        input_size = 2 * 2 + self.args.coding * 4
         output_size = 3
         if self.args.four:
             output_size = 4
-        return Neuralistica(
-            input_size=input_size, 
-            output_size=output_size, 
-            hidden_size=self.args.model_size, 
+        model = Neuralistica(
+            input_size=input_size,
+            output_size=output_size,
+            hidden_size=self.args.model_size,
             hidden_count=self.args.model_count,
+            activation=self.args.activation,
         ).to(self.device)
+        if self.args.activation == "sine" and first:
+            Futuristica.LOG.info("SIREN weight init applied")
+        return model
     # end of create_model
 
 
@@ -183,190 +235,71 @@ class Futuristica:
             "perceptual":    self.perceptual_loser,
             "hybrid":        self.hybrid_loser,
         }
-        if None:
-            return list(loss_fns.keys())
-        else:
-            if not key in loss_fns:
-                Futuristica.LOG.warning(f"Unknown loss function '{key}', defaulting to 'pixel'");
-                key = "mse"
-            return loss_fns[key]
+        if key not in loss_fns:
+            Futuristica.LOG.warning(f"Unknown loss function '{key}', defaulting to mse")
+            key = "mse"
+        return loss_fns[key]
 
 
-    # this version supports rollback but can take longer
     def train_back(self, coords, colors):
-        # Initialize model and move it to GPU
         model = self.create_model()
 
-        # If specified load the old checkpoint
-    
         if self.args.ckp and '""' != self.args.ckp:
             model = self.load_weights(model, self.args.ckp)
 
-        # Track the lowest loss
-        
-        best_model = None
-        best_loss = float('inf')
-        spammed = 0
-        imaged_too_soon = 100 * 10 # don't make too many images...
-        loss_fn = self.get_loss_function(self.args.loss_fn)()
+        best_model      = None
+        best_loss       = float('inf')
+        imaged_last     = 0
+        imaged_too_soon = 5000  # minimum epochs between checkpoint images
 
-        ################################################################################
-        # set up the optimizer and scheduler
-
-        #optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        loss_fn   = self.get_loss_function(self.args.loss_fn)()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
-        ################################################################################
+        epochs    = 5000 * self.args.training
 
-        # Training loop 
-        epochs = 5000 * self.args.training
-        Futuristica.LOG.info(f"Training for 5k x {self.args.training} (minutes) -> {epochs}");
+        # Cosine annealing over the full run — starts warm, cools to near-zero.
+        # Previously T_max was 100 — cycled thousands of times, effectively useless.
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
-        # don't rollback too often
+        Futuristica.LOG.info(f"Training for 5k x {self.args.training} (minutes) -> {epochs}")
 
-        # how long to go without improvement since the last checkpoint 
-        rollback_too_soon = self.args.rollback_too_soon
-        # but.. that only kicks if there was a checkpoint not too long ago
-        # if we go a *really* long time without checkpoint and without rollback
-        # then roll back cuz we wandered way off target
-        rollback_way_too_long = rollback_too_soon * self.args.rollback_way_too_long
-
-        # counters and tracking
-
-        rollback_last = 0
-        has_checkpoint = False
-        imaged_last = 0
-
-        # main training loop
+        # SIREN outputs [-1,1]; colour targets are [0,1] — remap before loss.
+        use_sine = self.args.activation == "sine"
 
         for epoch in range(epochs):
             optimizer.zero_grad()
-            predictions = model(coords)  # Forward pass
-            loss = loss_fn(predictions, colors)  # Compute loss
-            loss.backward()  # Backpropagation
-            optimizer.step()  # Update weights
-            scheduler.step()  # Update learning rate
+            predictions = model(coords)
+            if use_sine:
+                predictions = (predictions + 1.0) / 2.0
+            loss = loss_fn(predictions, colors)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
 
             loss_v = loss.item()
             self.loss_history.append(loss_v)
-            percent = (loss_v - best_loss) / best_loss * 100
-
             now = f"Epoch {epoch}[{int(epoch * 100 / epochs)}%]"
 
             if loss_v < best_loss:
-                # When the loss improves we save the model
-                spammed = spammed + 1
-                if spammed < 4:
-                    Futuristica.LOG.info(f"{now} Checkpoint since is {loss_v:.6f} vs {best_loss:.6f}, {percent:.4f}%")
-                best_loss = loss_v
-                best_model = self.create_model() 
-                best_model.load_state_dict(model.state_dict())  # Copy the model's state dict
-                best_model.cpu()  # Move the model to CPU
-                has_checkpoint = True
+                best_loss  = loss_v
+                best_model = self.create_model(first=False)
+                best_model.load_state_dict(model.state_dict())
+                best_model.cpu()
                 self.loss_bests.append(best_loss)
-                if 0 == imaged_last or epoch - imaged_last > imaged_too_soon:
+                if imaged_last == 0 or epoch - imaged_last > imaged_too_soon:
                     self.generate_image(model, self.args.generated, True)
-                    self.export_weights(model, self.args.weights) # warum nicht?
+                    self.export_weights(model, self.args.weights)
                     imaged_last = epoch
                     self.update_plot(epoch)
-            elif loss_v > best_loss:
-                # If the loss is getting worse for a while, we roll back
-                rollback_since_last = epoch - rollback_last
-                # if it's been a really long time since the last checkpoint and rollback
-                # training has gone way off course
-                if rollback_since_last > rollback_way_too_long and not has_checkpoint:
-                    Futuristica.LOG.info(f"{now}: PUNT: {rollback_since_last} way is too long!")
-                    has_checkpoint = True
-                if rollback_since_last > rollback_too_soon and has_checkpoint:
-                    Futuristica.LOG.warning(f"{now}: Rollback from {loss_v:.6f} to {best_loss:.6f}, {percent:.4f}%")
-                    model.load_state_dict(best_model.state_dict())  # Load the previous best state dict
-                    model.to(self.device) # Move the model back to GPU
-                    rollback_last = epoch
-                    has_checkpoint = False # at least not recently...
-                    spammed = 0
-            else:
-                spammed = 0
-            
+
             if epoch % 1000 == 0:
                 lr = scheduler.get_last_lr()[0]
                 self.update_plot(epoch)
                 Futuristica.LOG.info(f"{now}: Loss: {loss_v:.6f} vs ({best_loss:.6f}), LR:{lr:.6e}")
-                spammed = 0
 
         Futuristica.LOG.info(f"Training complete: {best_loss:.6f}")
-
         best_model.to(self.device)
         return best_model
-    #end of train
-
-
-    # this version is supposed to just keep the lowest lost model it sees
-    # FIXME: untested! 
-    def best_of_train(self, coords, colors):
-        # Initialize model and move it to GPU
-        model = self.create_model()
-
-        lowest = 1
-        best = model.state_dict().copy()
-
-        # Define loss function and optimizer
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-        loss_fn = self.get_loss_function(self.args.loss_fn)()
-
-        # Training loop 
-        epochs = 5000 * self.args.training
-        Futuristica.LOG.info(f"Training for 5k x {self.args.training} (minutes) -> {epochs}");
-
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            predictions = model(coords)  # Forward pass
-            loss = loss_fn(predictions, colors)  # Compute loss
-            loss.backward()  # Backpropagation
-            optimizer.step()  # Update weights
-            
-            if epoch % 1000 == 0:
-                now = f"Epoch {epoch}[{int(epoch * 100 / epochs)}%]"
-                Futuristica.LOG.info(f"{now}: Loss = {loss.item():.6f}")
-                if loss.item() < lowest:
-                    Futuristica.LOG.info(f"New lowest is {loss.item():.6f} vs {lowest:.6f}")
-                    lowest = loss.item()
-                    best = model.state_dict().copy()
-
-        Futuristica.LOG.info("Training complete!")
-
-        model.load_state_dict(best)  # Load the best state dict
-        model.to(self.device)
-        return model
-    #end of train
-
-
-    # the og! this just does what it does!
-    def og_train(self, coords, colors):
-        # Initialize model and move it to GPU
-        model = self.create_model()
-
-        # Define loss function and optimizer
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-        loss_fn = self.get_loss_function(self.args.loss_fn)()
-
-        # Training loop 
-        epochs = 5000 * self.args.training
-        Futuristica.LOG.info(f"Training for 5k x {self.args.training} (minutes) -> {epochs}");
-
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            predictions = model(coords)  # Forward pass
-            loss = loss_fn(predictions, colors)  # Compute loss
-            loss.backward()  # Backpropagation
-            optimizer.step()  # Update weights
-            
-            if epoch % 1000 == 0:
-                now = f"Epoch {epoch}[{int(epoch * 100 / epochs)}%]"
-                Futuristica.LOG.info(f"{now}: Loss = {loss.item():.6f}")
-
-        Futuristica.LOG.info("Training complete!")
-        return model
-    #end of train
+    #end of train_back
 
 
     # save out the results, you can run translate.py 
@@ -387,17 +320,11 @@ class Futuristica:
             return model
         Futuristica.LOG.info(f"Loading weights from {filename}")
         weights = np.load(filename)
-        noise_scale = .001
-        noise_scale = .077
         noise_scale = .01
         for name, param in model.named_parameters():
             ww = weights[name]
-            #ww += torch.randn_like(ww) * noise_scale
             ww += np.random.uniform(low=-noise_scale, high=noise_scale, size=ww.shape)
-
             param.data = torch.from_numpy(ww).to(param.device)
-            #param.data = torch.from_numpy(weights[name]).to(param.device)
-            #weights += torch.randn_like(weights) * noise_scale
         Futuristica.LOG.info(f"Loaded weights from {filename}")
         return model
     #end of load_weights
@@ -414,7 +341,7 @@ class Futuristica:
         inputs = np.stack((x_grid.flatten(), y_grid.flatten()), axis=1)
 
         if self.args.coding > 0:
-            inputs = self.positional_encoding(inputs, L=self.args.coding)
+            inputs = self.positional_encoding(inputs, L=self.args.coding, mapping=self.args.mapping)
 
         # Convert inputs to PyTorch tensor
         inputs_tensor = torch.from_numpy(inputs).float()
@@ -428,12 +355,14 @@ class Futuristica:
         # Pass inputs through the model
         outputs = model(inputs_tensor)
 
-        # Reshape and normalize the output
-        if self.args.four:
-            #outputs = self.ten_four(outputs)
-            outputs = outputs.reshape(size, size, 4).detach().cpu().numpy() * 255
-        else:
-            outputs = outputs.reshape(size, size, 3).detach().cpu().numpy() * 255
+        # Reshape and normalize the output.
+        # relu/tanh networks use Sigmoid so output is already [0,1].
+        # sine (SIREN) networks output in [-1,1] — remap to [0,1] first.
+        raw = outputs.reshape(size, size, -1).detach().cpu().numpy()
+        if self.args.activation == "sine":
+            raw = (raw + 1.0) / 2.0  # [-1,1] -> [0,1]
+        raw = np.clip(raw, 0.0, 1.0)
+        outputs = raw * 255
 
         if "ycbcr" == self.args.colorspace:
             outputs = self.ycbcr_to_rgb(outputs);
@@ -482,42 +411,66 @@ class Futuristica:
     # end of ten_four
 
 
-    """Encodes (x, y) coordinates into a high-dimensional space"""
-    # this seems to help learn sharp edges, but creates artifacts too
-    def positional_encoding(self, coords, L=3):
-        encodings = [coords]
+    def positional_encoding(self, coords, L=3, mapping="polar"):
+        """Encode (x,y) coordinates into a fixed-width feature vector.
 
+        All three mappings produce the same total width (2 + 2 + L*4)
+        so the network input size never changes when you switch --mapping.
+        The first 2 slots are always raw [x, y].
+        Slots 2-3 are the "spatial hint" — what differs per mapping.
+        Slots 4+ are always Fourier sin/cos bands.
+
+        polar   (default)
+            slots 2-3: [sin(θ), cos(θ)]  where θ = atan2(y,x)
+            Encodes direction without any discontinuity — sin/cos of angle
+            wraps smoothly everywhere unlike raw atan2 which jumps at the
+            negative x-axis.  radius intentionally dropped; the Fourier
+            bands already encode scale implicitly.
+
+        fourier
+            slots 2-3: first Fourier band (sin/cos of freq-0 * x, y)
+            Pure spectral encoding, no spatial structure hint.
+            Identical to the classic NeRF positional encoding.
+            Use L+1 effective bands; the loop starts at band 1.
+
+        legacy
+            slots 2-3: abs(fract()) kink-based terms from the original code
+            Kept for reproducibility. The kinks cause gradient noise and
+            banding artifacts — not recommended for new runs.
+
+        Output width = 2 + 2 + L*4 = 16 for L=3 (matches default input_size).
+        translate.py must mirror this exactly — both controlled by --mapping.
+        """
         x, y = coords[..., 0], coords[..., 1]
-        angle = x / (np.abs(y)+.001)
-        #np.arctan2(y, x) * (1.01-x*y) * 33 # the discontinuity caused noticable artifacts
-        
-        q = 22
-        x2 = np.abs(((x * q)%1)-.5) *2
-        y2 = np.abs(((y * q)%1)-.5) *2
-        angle = x2 * y2
-        length = (np.sqrt(x**2 + y**2) * q )%1
 
-        encodings = [coords, np.stack([angle, length], axis=-1)]
+        if mapping == "polar":
+            # sin/cos of angle — globally continuous, no atan2 jump
+            r     = np.sqrt(x**2 + y**2) + 1e-8   # avoid div-by-zero
+            s2    = np.stack([y / r, x / r], axis=-1)  # [sin θ, cos θ]
+            bands_start = 0  # use all L bands
 
-        for i in range(L):
-            if i % 2:
-                # this helps curvy shapes
-                encodings.append(np.sin((2.0 ** i) * np.pi * coords))
-                encodings.append(np.cos((2.0 ** i) * np.pi * coords))
-            else:
-                # this helps learn straight edges
-                encodings.append(np.abs((2.0 ** (i+.0) - .5) * coords))
-                encodings.append(np.abs((2.0 ** (i+.5) - .5) * coords))
-        return np.concatenate(encodings, axis=-1)
+        elif mapping == "fourier":
+            # first Fourier band fills the hint slots; loop starts at band 1
+            freq0 = np.pi  # 2^0 * pi
+            s2    = np.stack([np.sin(freq0 * x), np.cos(freq0 * x)], axis=-1)
+            bands_start = 1  # skip band 0, already used above
 
+        else:  # legacy
+            q   = 22.0
+            x2  = np.abs(((x * q) % 1) - 0.5) * 2
+            y2  = np.abs(((y * q) % 1) - 0.5) * 2
+            ang = x2 * y2
+            lng = (np.sqrt(x**2 + y**2) * q) % 1
+            s2  = np.stack([ang, lng], axis=-1)
+            bands_start = 0
 
-    # this helped a lot
-    def old_encoding(self, coords, L=10):
-        """Encodes (x, y) coordinates into a high-dimensional space"""
-        encodings = [coords]
-        for i in range(L):
-            encodings.append(np.sin((2.0 ** i) * np.pi * coords))
-            encodings.append(np.cos((2.0 ** i) * np.pi * coords))
+        encodings = [coords, s2]
+
+        for i in range(bands_start, bands_start + L):
+            freq = (2.0 ** i) * np.pi
+            encodings.append(np.sin(freq * coords))
+            encodings.append(np.cos(freq * coords))
+
         return np.concatenate(encodings, axis=-1)
 
 
@@ -560,46 +513,6 @@ class Futuristica:
         return perceptual_loss
 
 
-    def downsample_ycbcr(self, ycbcr_data, factor=2):
-        # Separate the Y, Cb, and Cr channels
-        y_channel = ycbcr_data[:, :, 0]
-        cb_channel = ycbcr_data[:, :, 1]
-        cr_channel = ycbcr_data[:, :, 2]
-
-        # Downsample the CbCr channels by a factor of 2
-        cb_downsampled = Image.fromarray(cb_channel.astype(np.uint8))
-        cb_downsampled = cb_downsampled.resize((cb_downsampled.width // factor, cb_downsampled.height // factor), Image.BICUBIC)
-        cb_downsampled = np.array(cb_downsampled)
-
-        cr_downsampled = Image.fromarray(cr_channel.astype(np.uint8))
-        cr_downsampled = cr_downsampled.resize((cr_downsampled.width // factor, cr_downsampled.height // factor), Image.BICUBIC)
-        cr_downsampled = np.array(cr_downsampled)
-
-        # Combine the Y, Cb, and Cr channels back together
-        ycbcr_downsampled = np.stack((y_channel, cb_downsampled, cr_downsampled), axis=2)
-        return ycbcr_downsampled
-
-
-    def upsample_ycbcr(self, ycbcr_upsampled, factor=2):
-        # Separate the Y, Cb, and Cr channels
-        y_channel  = ycbcr_upsampled[:, :, 0]
-        cb_channel = ycbcr_upsampled[:, :, 1]
-        cr_channel = ycbcr_upsampled[:, :, 2]
-
-        # Upsample the CbCr channels by a factor of 2
-        cb_upsampled = Image.fromarray(cb_channel.astype(np.uint8))
-        cb_upsampled = cb_upsampled.resize((cb_upsampled.width * factor, cb_upsampled.height * factor), Image.BICUBIC)
-        cb_upsampled = np.array(cb_upsampled)
-
-        cr_upsampled = Image.fromarray(cr_channel.astype(np.uint8))
-        cr_upsampled = cr_upsampled.resize((cr_upsampled.width * factor, cr_upsampled.height * factor), Image.BICUBIC)
-        cr_upsampled = np.array(cr_upsampled)
-
-        # Combine the Y, Cb, and Cr channels back together
-        ycbcr_upsampled = np.stack((y_channel, cb_upsampled, cr_upsampled), axis=2)
-        return ycbcr_upsampled
-
-
     def rgb_to_ycbcr(self, img_data):
         return np.clip(
             np.dot(img_data[:, :, :3], [
@@ -616,18 +529,7 @@ class Futuristica:
             rgb_data = np.concatenate((rgb_data, img_data[..., 3:]), axis=-1)
         return rgb_data
 
-    def old_ycbcr_to_rgb(sef, img_data):
-        return np.clip(
-            np.dot(img_data, [
-                [1, 0, 1.402], 
-                [1, -0.344136, -0.714136], 
-                [1, 1.772, 0]
-            ]), 0, 255
-        )
-        # return mat3(1, 0, 1.402, 1, -0.344136, -0.714136, 1, 1.772, 0.) * color;
 
-
-    # FIXME
     def rgb_to_yuv(self, img_data):
         return np.clip(
             np.dot(img_data[:, :, :3], [
@@ -658,7 +560,6 @@ class Futuristica:
         plt.ion()
         
         self.fig, (self.ax_loss, self.ax_image) = plt.subplots(1, 2, figsize=(12, 5), num="futuristica")
-        self.losses = []
 
         # Loss plot
         self.ax_loss.set_title("Training Loss Over Time")
@@ -681,11 +582,8 @@ class Futuristica:
         self.ax_loss.set_title(f"Training Loss Over Time: {last}")
         self.ax_loss.set_xlabel("Epoch")
         self.ax_loss.set_ylabel("Loss")
-        if not True:
-            self.ax_loss.plot(range(1, len(self.loss_history) + 1), self.loss_history, marker='o', linestyle='-')
-        else:
-            moving_average = np.convolve(self.loss_history, np.ones(10)/10, mode='valid')
-            self.ax_loss.plot(moving_average, color='blue', linestyle='--', label='Training Loss')
+        moving_average = np.convolve(self.loss_history, np.ones(10)/10, mode='valid')
+        self.ax_loss.plot(moving_average, color='blue', linestyle='--', label='Training Loss')
         self.ax_loss.plot(self.loss_bests, color='green', label="Best Loss")
         self.ax_loss.legend()
 

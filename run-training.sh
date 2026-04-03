@@ -9,7 +9,7 @@ _run_training_main() {
 	local file=${1-images/lenna.png}
 
 	# how long to run
-	local training=22
+	local training=33
 
 	# this is the image size, it will scale up or down too
 	local size=512
@@ -23,6 +23,7 @@ _run_training_main() {
 
 	# recommend using 16 (wide), 
 	# more than 4 layers and the glsl can be heavy on mobile, etc
+	# howerver, model_count=8 produces a sharper image
 	local model_size=16
 	local model_count=4
 
@@ -37,16 +38,7 @@ _run_training_main() {
 
 	local coding=3 
 
-	local extras=""
-
-	########################################################################################
-	colorspace="ycbcr"
-	training=120
-	extras="--four"
-	
-	colorspace="rgb"
-	extras="--steps 32 --four"
-	extras="--steps 32 --four -m og"
+	local extras="--four"
 
 	########################################################################################
 	
