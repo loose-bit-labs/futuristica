@@ -1,6 +1,7 @@
 #!/bin/bash	
 
 set -e -o pipefail
+source ./based.sh
 
 _run_training_main() {
 	########################################################################################
@@ -14,11 +15,11 @@ _run_training_main() {
 	local size=512
 
 	# other options: rgb and yuv, ycbcr seem to work best "in general"
- 	local colorspace="ycbcr"
+	local colorspace="ycbcr"
 
 	# this seems to be best but you can try the others
 	# these seem to work best: mse l1 huber bce klDiv
- 	local loss_fn="mse"
+	local loss_fn="mse"
 
 	# recommend using 16 (wide), 
 	# more than 4 layers and the glsl can be heavy on mobile, etc
@@ -29,50 +30,49 @@ _run_training_main() {
 	local ckp="futuristica.npz"
 
 	# use this if you want to start fresh
- 	local ckp="" 
+	local ckp="" 
 
 	# no longer suggest changing this... 3 is dialed in now to 
 	# encode vec2 (2d) to mat4 (16d) but go nuts!
 
 	local coding=3 
 
+	local extras=""
+
+	########################################################################################
+	colorspace="ycbcr"
+	training=120
+	extras="--four"
+	
+	colorspace="rgb"
+	extras="--steps 32 --four"
+	extras="--steps 32 --four -m og"
+
 	########################################################################################
 	
 	file=$(fullpath ${file})
 	if [ ! -f ${file} ] ; then
 		echo "where is this ${file} of which you speak?"
-		return  1
+		return 1
 	fi
 
 	if [ "" != "${ckp}" ] ; then
 		ckp=$(fullpath ${ckp})
 		if [ ! -f "${ckp}" ] ; then
 			echo "where is this ${ckp} of which you speak?"
-			return  1
+			return 2
 		fi
 	fi
 
 	########################################################################################
 
-	local now=$(date +"%Y-%m-%d_%H-%M-%S")
-	local dir=${PWD}/"run/training-${now}"
-	mkdir -p ${dir}/images
-	rm -f last
-	ln -s ${dir} last
-
-	echo "output will be in ${dir}"
-
-	echo "Backing up model"
-	awk '/class MLP/ {ON=1} /def forward/ {ON=0} ON{print}' futuristica.py > .m
-	mv -i .m ${dir}/model.py
-
-	cd ${dir}
+	go_train || return 3
 
 	########################################################################################
 
 	echo "Starting training"
 
-    time ../../futuristica.py          \
+	time ../../futuristica.py          \
 		--weights     weights.npz       \
 		--generated   images/output.png \
 		--loss_fn     ${loss_fn}   	   \
@@ -84,6 +84,7 @@ _run_training_main() {
 		--ckp         "${ckp}"          \
 		--model_size  ${model_size}    \
 		--model_count ${model_count}   \
+		${extras} \
 		2>&1 | tee train.log || return ${?}
 	echo "Training completed"
 
@@ -97,13 +98,6 @@ _run_training_main() {
 	cp -i weights.npz ../../zed.npz
 
 	########################################################################################
-}
-
-fullpath () { 
-    local f;
-    for f in $*; do
-        ( ( cd ${f} 2> /dev/null && echo ${PWD} ) || ( cd $(dirname ${f} ) 2> /dev/null && echo ${PWD}/$( basename ${f} ) ) );
-    done
 }
 
 _run_training_main ${*}

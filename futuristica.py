@@ -20,12 +20,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 
 # Define a simple neural network model
 # It seems like GLSL get's maxed out anything 32x32 or greater
-# Trying to go deep (giggetty)
+# 16x16 seems to work pretty well with 4 layers... 
+# Sometimes I've tried 6 but it will probably be too much for smaller
+# webgl hardware (like mobile)
 class Neuralistica(torch.nn.Module):
     def __init__(self, input_size=16, output_size=3, hidden_size=16, hidden_count=4):
         super().__init__()
-        layers = []
+        #print(f"Neuralistica model: input_size={input_size}, output_size={output_size}, hidden_size={hidden_size}, hidden_count={hidden_count})");
+        self.fullness(input_size, output_size, hidden_size, hidden_count)
+    #end of __init__
 
+    def fullness(self, input_size, output_size, hidden_size, hidden_count):
+        layers = []
         layers.append(torch.nn.Linear(input_size, hidden_size))
         layers.append(torch.nn.ReLU())
         for _ in range(hidden_count):
@@ -53,19 +59,23 @@ class Futuristica:
         losers = "mse l1 huber crossEntropy bce klDiv perceptual hybrid".split(" ")
 
         self.parser = argparse.ArgumentParser(description="This is Futuristica")
-        self.parser.add_argument("--image",       type=str)
-        self.parser.add_argument("--size",        type=int, default=512)
-        self.parser.add_argument("--weights",     type=str, default="weights.npz")
-        self.parser.add_argument("--generated",   type=str, default="generated_image.png")
-        self.parser.add_argument("--training",    type=int, default=20)
-        self.parser.add_argument("--coding",      type=int, default=2)
-        self.parser.add_argument("--ckp",         type=str)
-        self.parser.add_argument("--model_size",  type=int, default=16)
-        self.parser.add_argument("--model_count", type=int, default=4)
-        self.parser.add_argument("--loss_fn",     choices=losers, default="mse")
-        self.parser.add_argument("--colorspace",  choices=["rgb", "ycbcr", "yuv"], default="ycbcr")
+        self.parser.add_argument("-i", "--image",           type=str)
+        self.parser.add_argument("-r", "--size",            type=int, default=512)
+        self.parser.add_argument("-o", "--weights",         type=str, default="weights.npz")
+        self.parser.add_argument("-g", "--generated",       type=str, default="generated_image.png")
+        self.parser.add_argument("-t", "--training",        type=int, default=20)
+        self.parser.add_argument("-q", "--coding",          type=int, default=3)
+        self.parser.add_argument("-w", "--ckp",             type=str)
+        self.parser.add_argument("-s", "--model_size",      type=int, default=16)
+        self.parser.add_argument("-c", "--model_count",     type=int, default=4)
+        self.parser.add_argument("-l", "--loss_fn",         choices=losers, default="mse")
+        self.parser.add_argument("-k", "--colorspace",      choices=["rgb", "ycbcr", "yuv"], default="ycbcr")
+        self.parser.add_argument("-m", "--mechanism",       choices=["checker", "best", "og"], default="checker")
+        self.parser.add_argument("-f", "--four",            action="store_true")
+        self.parser.add_argument("-n", "--no_gui",          action="store_true")
         self.parser.add_argument("--rollback_too_soon",     type=int, default=100)
         self.parser.add_argument("--rollback_way_too_long", type=int, default=500)
+        self.parser.add_argument("--steps",                 type=int, default=0)
     # end of __init__
 
 
@@ -98,21 +108,14 @@ class Futuristica:
         img_data = np.array(img) / 255.0  # Convert to NumPy array and normalize
         # this is terrible: img_data = np.power(img_data, 2.2)  # Apply gamma correction
 
-        #def load_image(self, image_path):
-        #    ...
-        #    img_data = np.array(img) / 255.0  # Convert to NumPy array and normalize
-        #    ...
-        #    colors = img_data.reshape(-1, 3)  # (h*w, 3)
-        #
-        #    # Calculate mean of RGB values
-        #    mean_rgb = np.mean(colors, axis=1, keepdims=True)  # (h*w, 1)
-        #
-        #    # Append mean RGB value to colors
-        #    colors_with_mean = np.concatenate([colors, mean_rgb], axis=1)  # (h*w, 4)
-        #
-        #    ...
-        #    return (torch.tensor(coords, dtype=torch.float32, device=self.device),
-        #            torch.tensor(colors_with_mean, dtype=torch.float32, device=self.device))
+        if self.args.four:
+            mean_rgb = np.mean(img_data.reshape(-1, 3), axis=1, keepdims=True)  # (h*w, 1)
+        else:
+            mean_rgb = None
+
+        if 0 != self.args.steps:
+            self.LOG.info(f"there are {self.args.steps} steps")
+            img_data = np.floor(img_data * self.args.steps) / self.args.steps
 
         if "ycbcr" == self.args.colorspace:
             img_data = self.rgb_to_ycbcr(img_data)
@@ -127,6 +130,13 @@ class Futuristica:
         coords = np.stack([xx, yy], axis=-1).reshape(-1, 2)  # (h*w, 2)
         colors = img_data.reshape(-1, 3)  # (h*w, 3)
 
+        if not mean_rgb is None:
+            colors = np.concatenate([colors, mean_rgb], axis=1)  # (h*w, 4)
+
+        #if self.args.four:
+        #    mean_rgb = np.mean(colors, axis=1, keepdims=True)  # (h*w, 1)
+        #    colors = np.concatenate([colors, mean_rgb], axis=1)  # (h*w, 4)
+
         if self.args.coding > 0:
             coords = self.positional_encoding(coords, L=self.args.coding) #10)
 
@@ -138,19 +148,26 @@ class Futuristica:
 
     # TODO: make a training flag
     def train(self, coords, colors):
+        if "best" == self.args.mechanism:
+            return self.best_of_train(coords, colors)
+        if "og" == self.args.mechanism:
+            return self.og_train(coords, colors)
         return self.train_back(coords, colors)
-        return self.best_of_train(coords, colors)
-        return self.og_train(coords, colors)
+    # end of train
 
 
     def create_model(self):
         input_size = 2 * 2 + self.args.coding * 4 
+        output_size = 3
+        if self.args.four:
+            output_size = 4
         return Neuralistica(
             input_size=input_size, 
-            output_size=3, 
+            output_size=output_size, 
             hidden_size=self.args.model_size, 
             hidden_count=self.args.model_count,
         ).to(self.device)
+    # end of create_model
 
 
     def get_loss_function(self, key=None):
@@ -182,7 +199,7 @@ class Futuristica:
 
         # If specified load the old checkpoint
     
-        if self.args.ckp:
+        if self.args.ckp and '""' != self.args.ckp:
             model = self.load_weights(model, self.args.ckp)
 
         # Track the lowest loss
@@ -200,7 +217,6 @@ class Futuristica:
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
         ################################################################################
-
 
         # Training loop 
         epochs = 5000 * self.args.training
@@ -264,7 +280,6 @@ class Futuristica:
                 if rollback_since_last > rollback_too_soon and has_checkpoint:
                     Futuristica.LOG.warning(f"{now}: Rollback from {loss_v:.6f} to {best_loss:.6f}, {percent:.4f}%")
                     model.load_state_dict(best_model.state_dict())  # Load the previous best state dict
-                    #model.cuda()  # Move the model back to GPU
                     model.to(self.device) # Move the model back to GPU
                     rollback_last = epoch
                     has_checkpoint = False # at least not recently...
@@ -296,7 +311,7 @@ class Futuristica:
 
         # Define loss function and optimizer
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-        loss_fn = torch.nn.MSELoss()
+        loss_fn = self.get_loss_function(self.args.loss_fn)()
 
         # Training loop 
         epochs = 5000 * self.args.training
@@ -310,7 +325,8 @@ class Futuristica:
             optimizer.step()  # Update weights
             
             if epoch % 1000 == 0:
-                Futuristica.LOG.info(f"Epoch {epoch}: Loss = {loss.item():.6f}")
+                now = f"Epoch {epoch}[{int(epoch * 100 / epochs)}%]"
+                Futuristica.LOG.info(f"{now}: Loss = {loss.item():.6f}")
                 if loss.item() < lowest:
                     Futuristica.LOG.info(f"New lowest is {loss.item():.6f} vs {lowest:.6f}")
                     lowest = loss.item()
@@ -331,7 +347,7 @@ class Futuristica:
 
         # Define loss function and optimizer
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-        loss_fn = torch.nn.MSELoss()
+        loss_fn = self.get_loss_function(self.args.loss_fn)()
 
         # Training loop 
         epochs = 5000 * self.args.training
@@ -345,7 +361,8 @@ class Futuristica:
             optimizer.step()  # Update weights
             
             if epoch % 1000 == 0:
-                Futuristica.LOG.info(f"Epoch {epoch}: Loss = {loss.item():.6f}")
+                now = f"Epoch {epoch}[{int(epoch * 100 / epochs)}%]"
+                Futuristica.LOG.info(f"{now}: Loss = {loss.item():.6f}")
 
         Futuristica.LOG.info("Training complete!")
         return model
@@ -365,6 +382,9 @@ class Futuristica:
 
 
     def load_weights(self, model, filename="weights.npz"):
+        if not filename:
+            Futuristica.LOG.warning(f"no weights to load")
+            return model
         Futuristica.LOG.info(f"Loading weights from {filename}")
         weights = np.load(filename)
         noise_scale = .001
@@ -374,7 +394,6 @@ class Futuristica:
             ww = weights[name]
             #ww += torch.randn_like(ww) * noise_scale
             ww += np.random.uniform(low=-noise_scale, high=noise_scale, size=ww.shape)
-
 
             param.data = torch.from_numpy(ww).to(param.device)
             #param.data = torch.from_numpy(weights[name]).to(param.device)
@@ -410,12 +429,19 @@ class Futuristica:
         outputs = model(inputs_tensor)
 
         # Reshape and normalize the output
-        outputs = outputs.reshape(size, size, 3).detach().cpu().numpy() * 255
+        if self.args.four:
+            #outputs = self.ten_four(outputs)
+            outputs = outputs.reshape(size, size, 4).detach().cpu().numpy() * 255
+        else:
+            outputs = outputs.reshape(size, size, 3).detach().cpu().numpy() * 255
 
         if "ycbcr" == self.args.colorspace:
             outputs = self.ycbcr_to_rgb(outputs);
         elif "yuv" == self.args.colorspace:
             outputs = self.yuv_to_rgb(outputs);
+
+        if self.args.four:
+            outputs = self.ten_four(outputs, False)
 
         # Convert output to image
         self.last_image = outputs
@@ -432,6 +458,28 @@ class Futuristica:
         image.save(filename)
         Futuristica.LOG.info(f"Generated image as {filename}")
     # end of generated_image
+
+    
+    # convert from "rgbG" 
+    def ten_four(self, outputs, needs_reshaping = True):
+        size = self.args.size
+        if needs_reshaping:
+            outputs = outputs.reshape(size, size, 4).detach().cpu().numpy()
+
+        outputs = outputs / 255
+
+        # Split "RGB" and grayscale
+        rgb = outputs[..., :3]
+        grayscale = outputs[..., 3:4]  # keep dims for broadcasting
+
+        # Calculate mean of RGB, avoiding division by zero
+        mean = np.mean(rgb, axis=-1, keepdims=True)
+        mean = np.where(mean == 0, 1e-6, mean)  # Prevent division by zero
+
+        ratio = grayscale / mean
+
+        return rgb * ratio * 255 
+    # end of ten_four
 
 
     """Encodes (x, y) coordinates into a high-dimensional space"""
@@ -561,8 +609,14 @@ class Futuristica:
             ]), 0, 1
         )
 
+    def ycbcr_to_rgb(self, img_data):
+        transformation_matrix = np.array([[1, 0, 1.402], [1, -0.344136, -0.714136], [1, 1.772, 0]])
+        rgb_data = np.clip(np.dot(img_data[..., :3], transformation_matrix), 0, 255)
+        if img_data.shape[-1] == 4:
+            rgb_data = np.concatenate((rgb_data, img_data[..., 3:]), axis=-1)
+        return rgb_data
 
-    def ycbcr_to_rgb(sef, img_data):
+    def old_ycbcr_to_rgb(sef, img_data):
         return np.clip(
             np.dot(img_data, [
                 [1, 0, 1.402], 
@@ -573,6 +627,7 @@ class Futuristica:
         # return mat3(1, 0, 1.402, 1, -0.344136, -0.714136, 1, 1.772, 0.) * color;
 
 
+    # FIXME
     def rgb_to_yuv(self, img_data):
         return np.clip(
             np.dot(img_data[:, :, :3], [
@@ -597,6 +652,9 @@ class Futuristica:
 
 
     def create_plot(self):
+        if self.args.no_gui:
+            self.LOG.info("no gui...")
+            return
         plt.ion()
         
         self.fig, (self.ax_loss, self.ax_image) = plt.subplots(1, 2, figsize=(12, 5), num="futuristica")
@@ -611,9 +669,12 @@ class Futuristica:
         self.ax_image.set_title("Latest Generated Image")
         size = self.args.size
         self.image_plot = self.ax_image.imshow(np.zeros((size, size, 3))) # Placeholder image
+    # end of create_plot
         
 
     def update_plot(self, epoch = -3e3):
+        if self.args.no_gui:
+            return
         last = self.loss_history[-1]
         # Update loss plot
         self.ax_loss.clear()
@@ -636,6 +697,7 @@ class Futuristica:
         # Redraw canvas
         plt.draw()
         plt.pause(0.1)  # Small pause to allow update
+    # end of update_plot
 
 
 # end of class Futuristica

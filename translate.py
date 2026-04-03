@@ -26,6 +26,9 @@ class Translate:
 
         print("float relu(float f) { return max(.0, f);}")
         print("float sigmoid(float f) { return 1. / (1. + exp(-f)); }")
+        print("float layeriate(mat4 lair, mat4 q) {")
+        print("\treturn dot(lair[0], q[0]) + dot(lair[1], q[1]) + dot(lair[2], q[2]) + dot(lair[3], q[3]);")
+        print("}")
         print("");
 
         data, workspace_size, names, sizes, values = self.load(args)
@@ -48,7 +51,7 @@ class Translate:
         print("")
         
         for name, valuez in values.items():
-            vv = ",".join(map(lambda x: "{:.2f}".format(x).replace("0.", "."),valuez)) # entry.flatten()))
+            vv = ",".join(map(lambda x: "{:.4f}".format(x).replace("0.", "."),valuez)) # entry.flatten()))
             print(f"const float {name}[] = float[{len(valuez)}]({vv});")
         print("");
         
@@ -105,11 +108,13 @@ class Translate:
 
     def color_back(self, args):
         if "ycbcr" == args.colorspace:
-            print("\treturn mat3(1, 0, 1.402, 1, -0.344136, -0.714136, 1, 1.772, 0.) * color;")
+            print("\tcolor = mat3(1, 0, 1.402, 1, -0.344136, -0.714136, 1, 1.772, 0.) * color;")
         elif "yuv" == args.colorspace:
-            print("\treturn mat3(1, 0, 1.13983, 1, -0.39465, -0.58060, 1, 2.03211, 0) * color;")
-        else:
-            print("\treturn color;")
+            print("\tcolor = mat3(1, 0, 1.13983, 1, -0.39465, -0.58060, 1, 2.03211, 0) * color;")
+        if self.is_four:
+            print("\tfloat grayed = kolor.a / ((color.r + color.g + color.b ) / 3.);")
+            print("\tcolor *= grayed;")
+        print("\treturn color;")
     # end of color_back
 
         
@@ -267,11 +272,11 @@ class Translate:
 
             for i in range(layer_size[0]):
                 tmp = f"{dst}[{i}]"
-                q = f"{values_bias[i]:.2f}"
+                q = f"{values_bias[i]:.4f}"
                 s = f"\t{tmp:7s} = {fnk}({q}"
                 for j in range(layer_size[1]):
                     k = i * layer_size[1] + j
-                    s += f" + {src}[{j}]*{values_weights[k]:.2f}"
+                    s += f" + {src}[{j}]*{values_weights[k]:.4f}"
                 print(f"{s.replace('0.', '.')});");
 
             if last:
@@ -291,7 +296,8 @@ class Translate:
     def sweet16(self, sizes):
         values = list(sizes.values())
         last_two_values = values[-2:]
-        if last_two_values != [[3, 16], [3]]:
+        self.is_four = last_two_values == [[4, 16], [4]]
+        if not self.is_four and last_two_values != [[3, 16], [3]]:
             return False
         for value in values[:-2]:
             if value not in [[16, 16], [16]]:
@@ -342,17 +348,31 @@ class Translate:
 
             print(f"\t// layer {index}: {sizes[weights]} {last}");
             if last:
-                print("\tvec3 color = vec3(")
-                print(f"\t\t  sigmoid({values_bias[0]:.2f}{self.dodod(a, values_weights, 0)})")
-                print(f"\t\t, sigmoid({values_bias[1]:.2f}{self.dodod(a, values_weights, 1)})")
-                print(f"\t\t, sigmoid({values_bias[2]:.2f}{self.dodod(a, values_weights, 2)})")
-                print("\t);")
+                if self.is_four:
+                    print("\tvec4 kolor = vec4(")
+                    print(f"\t\t  sigmoid({values_bias[0]:.4f}{self.dodod(a, values_weights, 0)})")
+                    print(f"\t\t, sigmoid({values_bias[1]:.4f}{self.dodod(a, values_weights, 1)})")
+                    print(f"\t\t, sigmoid({values_bias[2]:.4f}{self.dodod(a, values_weights, 2)})")
+                    print(f"\t\t, sigmoid({values_bias[2]:.4f}{self.dodod(a, values_weights, 2)})")
+                    print("\t);")
+                    print("\tvec3 color = kolor.rgb;")
+                    #print("\tfloat grayed = kolor.a / ((kolor.r + kolor.g + kolor.b ) / 3.);")
+                    #print("\tvec3 color = kolor.rgb * grayed;")
+                else:
+                    print("\tvec3 color = vec3(")
+                    print(f"\t\t  sigmoid({values_bias[0]:.4f}{self.dodod(a, values_weights, 0)})")
+                    print(f"\t\t, sigmoid({values_bias[1]:.4f}{self.dodod(a, values_weights, 1)})")
+                    print(f"\t\t, sigmoid({values_bias[2]:.4f}{self.dodod(a, values_weights, 2)})")
+                    print("\t);")
             else:
                 print(f"\t{b} = mat4(")
                 c = " "
                 for i in range(16):
-                    s = f"relu({values_bias[i]:.2f}".replace("0.", ".")
-                    s += self.dodod(a, values_weights, i)
+                    s = f"relu({values_bias[i]:.4f}".replace("0.", ".")
+                    if True:
+                        s += self.dodod_jr(a, values_weights, i)
+                    else:
+                        s += self.dodod(a, values_weights, i)
                     s += ")"
                     print(f"\t\t{c} {s}") # // {i}")
                     c = ","
@@ -365,17 +385,38 @@ class Translate:
         print("}")
     # end of my_sweetie (just in code)
 
-    def dodod(self, a, values_weights, i):
+    def dodod(self, a, weights, i):
         s = ""
         for j in range(4):
             s += f" + dot({a}[{j}], vec4("
             cc = ""
             for k in range(4):
-                s += f"{cc}{values_weights[i * 16 + j * 4 + k]:.2f}".replace("0.", ".")
+                index = i * 16 + j * 4 + k
+                if index < len(weights):
+                    weight = weights[index]
+                else:
+                    weight = 0
+                s += f"{cc}{weight:.4f}".replace("0.", ".")
                 cc = ","
             s += "))"
         return s
     # end of dodo
+
+    def dodod_jr(self, a, weights, i):
+        s = f" + layeriate({a}, mat4("
+        cc = ""
+        for j in range(4):
+            for k in range(4):
+                index = i * 16 + j * 4 + k
+                if index < len(weights):
+                    weight = weights[index]
+                else:
+                    weight = 0
+                s += f"{cc}{weight:.4f}".replace("0.", ".")
+                cc = ","
+        s += "))"
+        return s
+    # end of dodo_jr
 
     def make_main(self):
         #print("void mainImage(out vec4 to, in vec2 at) {")
