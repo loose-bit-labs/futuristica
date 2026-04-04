@@ -81,7 +81,7 @@ _run_training_main() {
 	echo "Training completed"
 
 	# note: this -s only works of model_size 16, so change this if you change that... 
-	../../translate.py -s --coding ${coding} --colorspace ${colorspace} weights.npz > output.glsl
+	../../translate.py --coding ${coding} --colorspace ${colorspace} weights.npz > output.glsl
 
 	ls -lathr ${dir}/*.*
 
