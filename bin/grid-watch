@@ -37,7 +37,7 @@ _main() {
         # count for the status line
         local total done_count
         total=$(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | wc -l)
-        done_count=$(grep -rl "Training complete:" "${grid_dir}"/*/train.log 2>/dev/null | wc -l)
+        done_count=$(grep -rl "Training complete:" "${grid_dir}"/*/train.log 2>/dev/null | wc -l || true)
         printf "\r[%s] %d/%d complete — %s" "$(date +%H:%M:%S)" "${done_count}" "${total}" "${out}" >&2
         sleep "${interval}"
     done
