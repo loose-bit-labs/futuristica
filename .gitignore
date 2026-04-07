@@ -1,0 +1,8 @@
+local.conf
+__pycache__/
+*.pyc
+grid-run/
+run/
+last
+*.npz
+*.glsl

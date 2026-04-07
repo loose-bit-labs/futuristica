@@ -1,0 +1,61 @@
+#!/bin/bash
+
+set -e -o pipefail
+
+BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+export PYENV_VERSION=$(cat "${BASE}/../.python-version" 2>/dev/null || echo "")
+source "${BASE}/../lib/based.sh"
+
+_run_training_main() {
+	local file=${1:-${BASE}/../images/lenna.png}
+
+	# defaults — override any of these in local.conf
+	local training=20
+	local size=512
+	local colorspace="ycbcr"
+	local loss_fn="l1"
+	local model_size=16
+	local model_count=4
+	local coding=3
+	local extras=""
+	local ckp=""
+	TRAIN_DIR="${TRAIN_DIR:-${BASE}/../run}"
+
+	[ -f "${BASE}/../local.conf" ] && source "${BASE}/../local.conf"
+
+	file=$(fullpath ${file})
+	[ -f "${file}" ] || { echo "image not found: ${file}"; return 1; }
+
+	if [ -n "${ckp}" ]; then
+		ckp=$(fullpath ${ckp})
+		[ -f "${ckp}" ] || { echo "checkpoint not found: ${ckp}"; return 2; }
+	fi
+
+	go_train || return 3
+
+	echo "Starting training"
+	time "${BASE}/futuristica"      \
+		--weights     weights.npz   \
+		--generated   images/output.png \
+		--loss_fn     ${loss_fn}    \
+		--coding      ${coding}     \
+		--training    ${training}   \
+		--size        ${size}       \
+		--image       ${file}       \
+		--colorspace  ${colorspace} \
+		--ckp         "${ckp}"      \
+		--model_size  ${model_size} \
+		--model_count ${model_count} \
+		${extras}                   \
+		2>&1 | tee train.log || return ${?}
+	echo "Training completed"
+
+	# -s flag only works for model_size=16
+	"${BASE}/translate" -s --coding ${coding} --colorspace ${colorspace} weights.npz > output.glsl
+
+	ls -lathr ./*.*
+	echo "output is in ${PWD}"
+	cp -i weights.npz "${BASE}/../zed.npz"
+}
+
+_run_training_main ${*}

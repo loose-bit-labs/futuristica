@@ -1,0 +1,584 @@
+#!/bin/bash
+
+# grid-html-maker — generate an HTML matrix report for a completed grid run.
+#
+# Usage: grid-html-maker [grid-dir]
+#   With no argument, uses the most recent run under RUN_DIR (from local.conf).
+#   Writes index.html into the grid dir and prints its path to stderr.
+
+set -e -o pipefail
+
+BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+[ -f "${BASE}/../local.conf" ] && source "${BASE}/../local.conf"
+
+# --------------------------------------------------------------------------- #
+
+_main() {
+    local grid_dir=${1}
+
+    if [ -z "${grid_dir}" ]; then
+        local run_dir="${RUN_DIR:-${BASE}/../grid-run}"
+        grid_dir=$(ls -td "${run_dir}"/grid-* 2>/dev/null | head -1)
+        [ -z "${grid_dir}" ] && { echo "Usage: $0 <grid-dir>" >&2; exit 1; }
+    fi
+
+    grid_dir=$(realpath "${grid_dir}")
+    local results="${grid_dir}/results.txt"
+    [ -f "${results}" ] || { echo "No results.txt in ${grid_dir}" >&2; exit 1; }
+
+    local html="${grid_dir}/index.html"
+    _generate_html "${grid_dir}" "${results}" > "${html}"
+    echo "Report: ${html}" >&2
+}
+
+# --------------------------------------------------------------------------- #
+
+_generate_html() {
+    local grid_dir=$1
+    local results=$2
+    local ts
+    ts=$(basename "${grid_dir}")
+
+    # ---- parse results.txt (if populated) ----------------------------------
+    declare -A loss_of   # trial_name -> training loss value
+    declare -A psnr_of   # trial_name -> PSNR in dB (N/A if not logged)
+    declare -A dir_of    # trial_name -> absolute dir
+    local names=()
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^trial ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^[^a-zA-Z0-9]+ ]] && continue
+        local n l d
+        n=$(awk '{print $1}' <<< "$line")
+        l=$(awk '{print $2}' <<< "$line")
+        d=$(awk '{print $3}' <<< "$line")
+        [[ -z "$n" || -z "$l" ]] && continue
+        loss_of[$n]=$l
+        dir_of[$n]=$d
+        names+=("$n")
+    done < "${results}"
+
+    # ---- fall back: scan trial dirs if results.txt was empty ----------------
+    if [ ${#names[@]} -eq 0 ]; then
+        for trial_dir in "${grid_dir}"/loss*; do
+            [ -d "${trial_dir}" ] || continue
+            local n
+            n=$(basename "${trial_dir}")
+            local l="N/A"
+            if [ -f "${trial_dir}/train.log" ]; then
+                local extracted
+                extracted=$(grep "Training complete:" "${trial_dir}/train.log" 2>/dev/null \
+                    | tail -1 | grep -oP '[\d.]+$' || true)
+                [ -n "${extracted}" ] && l="${extracted}"
+            fi
+            loss_of[$n]=$l
+            dir_of[$n]=$trial_dir
+            names+=("$n")
+        done
+    fi
+
+    # ---- extract PSNR from train.log (present on runs using new trainer) ----
+    for n in "${names[@]}"; do
+        local d="${dir_of[$n]}"
+        local p="N/A"
+        if [ -f "${d}/train.log" ]; then
+            local extracted
+            extracted=$(grep "Eval PSNR:" "${d}/train.log" 2>/dev/null \
+                | tail -1 | grep -oP '[\d.]+(?=dB)' || true)
+            [ -n "${extracted}" ] && p="${extracted}"
+        fi
+        psnr_of[$n]=$p
+    done
+
+    # flag whether any PSNR data exists — if not, fall back to training loss for sort
+    local have_psnr=0
+    for n in "${names[@]}"; do
+        [ "${psnr_of[$n]}" != "N/A" ] && { have_psnr=1; break; }
+    done
+
+    # ---- derive matrix axes from trial names --------------------------------
+    # name: loss${fn}-cs${cs}-map${map}-layers${layers}
+    declare -A best_sort_of_cfg   # "fn|cs|map" -> sort key (best PSNR or loss)
+    declare -A layers_seen
+
+    for n in "${names[@]}"; do
+        local fn cs mp ly
+        fn=$(sed 's/^loss\([^-]*\).*/\1/' <<< "$n")
+        cs=$(sed 's/.*-cs\([^-]*\).*/\1/' <<< "$n")
+        mp=$(sed 's/.*-map\([^-]*\).*/\1/' <<< "$n")
+        ly=$(sed 's/.*-layers\([0-9]*\)$/\1/' <<< "$n")
+        local cfg="${fn}|${cs}|${mp}"
+
+        # use PSNR (higher=better) when available, else training loss (lower=better)
+        if [ "$have_psnr" -eq 1 ]; then
+            local pv="${psnr_of[$n]}"
+            if [ "$pv" != "N/A" ]; then
+                local cur="${best_sort_of_cfg[$cfg]:-0}"
+                if (( $(echo "$pv > $cur" | bc -l 2>/dev/null || echo 0) )); then
+                    best_sort_of_cfg[$cfg]=$pv
+                fi
+            else
+                [ -z "${best_sort_of_cfg[$cfg]}" ] && best_sort_of_cfg[$cfg]=0
+            fi
+        else
+            local lv="${loss_of[$n]}"
+            if [ "$lv" != "N/A" ]; then
+                # store as negative so sort -n still puts best first
+                local neg
+                neg=$(echo "-${lv}" | bc -l)
+                local cur="${best_sort_of_cfg[$cfg]:--9999}"
+                if (( $(echo "$neg > $cur" | bc -l 2>/dev/null || echo 0) )); then
+                    best_sort_of_cfg[$cfg]=$neg
+                fi
+            else
+                [ -z "${best_sort_of_cfg[$cfg]}" ] && best_sort_of_cfg[$cfg]=-9999
+            fi
+        fi
+        layers_seen[$ly]=1
+    done
+
+    # sort configs by best sort key descending (best first)
+    local sorted_cfgs=()
+    while IFS= read -r entry; do
+        sorted_cfgs+=("${entry#*|}")
+    done < <(
+        for cfg in "${!best_sort_of_cfg[@]}"; do
+            printf '%s|%s\n' "${best_sort_of_cfg[$cfg]}" "$cfg"
+        done | sort -t'|' -k1 -rn
+    )
+
+    # sort layer counts numerically
+    local sorted_layers=()
+    while IFS= read -r l; do sorted_layers+=("$l"); done \
+        < <(printf '%s\n' "${!layers_seen[@]}" | sort -n)
+
+    # ---- build per-trial slide lists ----------------------------------------
+    declare -A slides_of   # trial_name -> JSON array of relative paths
+
+    for n in "${names[@]}"; do
+        local d="${dir_of[$n]}"
+        local rel
+        rel=$(basename "$d")
+        local arr="["
+        local sep=""
+        # intermediate checkpoints, sorted chronologically
+        for img in $(ls -v "${d}/images/output-"*.png 2>/dev/null); do
+            arr="${arr}${sep}\"${rel}/images/$(basename "$img")\""
+            sep=","
+        done
+        # final output last
+        if [ -f "${d}/images/output.png" ]; then
+            arr="${arr}${sep}\"${rel}/images/output.png\""
+        fi
+        arr="${arr}]"
+        slides_of[$n]=$arr
+    done
+
+    # ---- find global loss range for colour coding ---------------------------
+    local min_loss=9999 max_loss=0
+    for n in "${names[@]}"; do
+        local lv="${loss_of[$n]}"
+        [ "$lv" = "N/A" ] && continue
+        (( $(echo "$lv < $min_loss" | bc -l) )) && min_loss=$lv
+        (( $(echo "$lv > $max_loss" | bc -l) )) && max_loss=$lv
+    done
+
+    # ---- find the single best trial overall ---------------------------------
+    local best_name=""
+    local best_val=9999
+    for n in "${names[@]}"; do
+        local lv="${loss_of[$n]}"
+        [ "$lv" = "N/A" ] && continue
+        (( $(echo "$lv < $best_val" | bc -l) )) && { best_val=$lv; best_name=$n; }
+    done
+
+    local ncols=${#sorted_layers[@]}
+
+    # ==== emit HTML ==========================================================
+    cat << HEADEOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Grid ${ts}</title>
+<style>
+:root {
+  --bg:      #0e0e0e;
+  --bg2:     #1a1a1a;
+  --bg3:     #252525;
+  --border:  #2e2e2e;
+  --text:    #ddd;
+  --muted:   #666;
+  --accent:  #5af;
+  --best:    #5af;
+  --fail:    #f55;
+  --cell-w:  200px;
+  --img-h:   180px;
+  --label-w: 160px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  padding: 1.5rem;
+}
+
+h1 { color: var(--accent); font-size: 1.2rem; margin-bottom: .3rem; }
+.meta { color: var(--muted); font-size: .8rem; margin-bottom: 1.5rem; line-height: 1.9; }
+.meta b { color: #aaa; }
+
+/* ---- matrix ---- */
+.matrix-wrap { overflow-x: auto; }
+
+.matrix {
+  display: grid;
+  grid-template-columns: var(--label-w) repeat(${ncols}, var(--cell-w));
+  gap: 3px;
+  width: max-content;
+}
+
+/* header row */
+.col-head {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .4rem .5rem;
+  text-align: center;
+  font-size: .75rem;
+  color: var(--accent);
+  letter-spacing: .04em;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.corner {
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 20;
+}
+
+/* config label */
+.cfg-label {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .5rem .6rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: .15rem;
+  position: sticky;
+  left: 0;
+  z-index: 5;
+}
+.cfg-label .fn  { color: #e8a; font-weight: 600; }
+.cfg-label .cs  { color: #ae8; }
+.cfg-label .mp  { color: #8ae; }
+.cfg-label .rank { color: var(--muted); font-size: .7rem; margin-top: .25rem; }
+
+/* trial cell */
+.cell {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  transition: border-color .15s;
+}
+.cell:hover       { border-color: #555; }
+.cell.best-cell   { border-color: var(--best); box-shadow: 0 0 0 1px var(--best); }
+.cell.failed-cell { opacity: .45; }
+
+.img-wrap {
+  position: relative;
+  width: 100%;
+  height: var(--img-h);
+  overflow: hidden;
+  cursor: ew-resize;
+  flex-shrink: 0;
+}
+.img-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* scrub progress bar */
+.scrub-bar {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 3px;
+  background: rgba(255,255,255,.08);
+}
+.scrub-pos {
+  height: 100%;
+  width: 100%;
+  background: var(--accent);
+  transition: width .05s linear;
+}
+
+/* frame counter */
+.frame-info {
+  position: absolute;
+  top: 4px; right: 5px;
+  font-size: .65rem;
+  color: rgba(255,255,255,.6);
+  background: rgba(0,0,0,.55);
+  padding: 1px 4px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity .1s;
+  pointer-events: none;
+}
+.img-wrap:hover .frame-info { opacity: 1; }
+
+/* scrub hint shown on first hover */
+.scrub-hint {
+  position: absolute;
+  bottom: 6px; left: 50%;
+  transform: translateX(-50%);
+  font-size: .6rem;
+  color: rgba(255,255,255,.5);
+  background: rgba(0,0,0,.6);
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.img-wrap:hover .scrub-hint { opacity: 1; }
+.img-wrap.scrubbed .scrub-hint { opacity: 0; }
+
+.cell-footer {
+  padding: .35rem .5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.loss-val {
+  font-size: .8rem;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+.layers-badge {
+  font-size: .65rem;
+  color: var(--muted);
+}
+.best-badge {
+  font-size: .6rem;
+  background: var(--best);
+  color: #000;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 700;
+}
+.psnr-val {
+  font-size: .7rem;
+  color: #8d8;
+  letter-spacing: .02em;
+}
+.no-psnr { color: var(--muted); font-style: italic; }
+.psnr-note {
+  margin-bottom: 1rem;
+  padding: .4rem .75rem;
+  background: #1e1a00;
+  border: 1px solid #554400;
+  border-radius: 4px;
+  color: #bb9;
+  font-size: .78rem;
+}
+.fail-msg {
+  padding: 1rem;
+  color: var(--fail);
+  font-size: .75rem;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+</style>
+</head>
+<body>
+<h1>Futuristica — grid run</h1>
+<div class="meta">
+  <b>${ts}</b> &nbsp;·&nbsp;
+  <b>${#names[@]}</b> trials &nbsp;·&nbsp;
+  best training loss: <b>${best_val}</b> (${best_name})
+</div>
+HEADEOF
+
+    if [ "$have_psnr" -eq 0 ]; then
+        echo '<div class="psnr-note">Sorted by training loss — not directly comparable across loss functions. Re-run with current code to get PSNR-based ranking.</div>'
+    fi
+
+    cat << MATEOF
+<div class="matrix-wrap">
+<div class="matrix">
+  <div class="corner col-head"></div>
+MATEOF
+
+    # column headers
+    for ly in "${sorted_layers[@]}"; do
+        echo "  <div class=\"col-head\">${ly} layers</div>"
+    done
+
+    # data rows
+    local row_rank=1
+    for cfg in "${sorted_cfgs[@]}"; do
+        IFS='|' read -r fn cs mp <<< "$cfg"
+        local best_for_cfg="${best_loss_of_cfg[$cfg]}"
+        [ "$best_for_cfg" = "9999" ] && best_for_cfg="N/A"
+
+        echo "  <div class=\"cfg-label\">"
+        echo "    <span class=\"fn\">${fn}</span>"
+        echo "    <span class=\"cs\">${cs}</span>"
+        echo "    <span class=\"mp\">${mp}</span>"
+        echo "    <span class=\"rank\">#${row_rank} best: ${best_for_cfg}</span>"
+        echo "  </div>"
+
+        for ly in "${sorted_layers[@]}"; do
+            local n="loss${fn}-cs${cs}-map${mp}-layers${ly}"
+            local lv="${loss_of[$n]:-N/A}"
+            local slides="${slides_of[$n]:-[]}"
+            local final_img="$(basename "${dir_of[$n]:-x}")/images/output.png"
+            local extra_class=""
+            [ "$n" = "$best_name" ] && extra_class=" best-cell"
+            [ "$lv" = "N/A" ] && extra_class=" failed-cell"
+
+            echo "  <div class=\"cell${extra_class}\" data-loss=\"${lv}\" data-slides='${slides}'>"
+            if [ "$lv" != "N/A" ] && [ -f "${grid_dir}/${final_img}" ]; then
+                echo "    <div class=\"img-wrap\">"
+                echo "      <img class=\"thumb\" src=\"${final_img}\" loading=\"lazy\" draggable=\"false\">"
+                echo "      <div class=\"scrub-bar\"><div class=\"scrub-pos\"></div></div>"
+                echo "      <div class=\"frame-info\"></div>"
+                echo "      <div class=\"scrub-hint\">← scrub →</div>"
+                echo "    </div>"
+                local pv="${psnr_of[$n]:-N/A}"
+                echo "    <div class=\"cell-footer\">"
+                echo "      <span class=\"loss-val\" data-raw=\"${lv}\">${lv}</span>"
+                [ "$n" = "$best_name" ] && echo "      <span class=\"best-badge\">best</span>"
+                echo "      <span class=\"layers-badge\">${ly}L</span>"
+                echo "    </div>"
+                if [ "$pv" != "N/A" ]; then
+                    echo "    <div style=\"padding:.1rem .5rem .35rem; font-size:.7rem;\"><span class=\"psnr-val\" data-psnr=\"${pv}\">${pv} dB</span></div>"
+                fi
+            else
+                echo "    <div class=\"fail-msg\">✗ ${lv}</div>"
+            fi
+            echo "  </div>"
+        done
+
+        row_rank=$(( row_rank + 1 ))
+    done
+
+    cat << FOOTEREOF
+</div><!-- .matrix -->
+</div><!-- .matrix-wrap -->
+
+<script>
+(function () {
+
+  // colour-code training loss: green (low) → red (high)
+  const MIN = ${min_loss};
+  const MAX = ${max_loss};
+
+  function lossColor(v) {
+    if (v === null || isNaN(v)) return '#888';
+    const t = Math.max(0, Math.min(1, (v - MIN) / (MAX - MIN || 1)));
+    const h = Math.round(120 * (1 - t));
+    return \`hsl(\${h}, 65%, 48%)\`;
+  }
+
+  document.querySelectorAll('.loss-val[data-raw]').forEach(el => {
+    const v = parseFloat(el.dataset.raw);
+    el.style.color = lossColor(v);
+  });
+
+  // colour-code PSNR: green (high/best) → red (low)
+  const psnrEls = [...document.querySelectorAll('.psnr-val[data-psnr]')];
+  if (psnrEls.length) {
+    const vals = psnrEls.map(e => parseFloat(e.dataset.psnr)).filter(v => !isNaN(v));
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    psnrEls.forEach(el => {
+      const v = parseFloat(el.dataset.psnr);
+      const t = Math.max(0, Math.min(1, (v - lo) / (hi - lo || 1)));
+      const h = Math.round(120 * t);   // 0=red (low dB), 120=green (high dB)
+      el.style.color = \`hsl(\${h}, 65%, 52%)\`;
+    });
+  }
+
+  // ---- scrub interaction --------------------------------------------------
+  document.querySelectorAll('.cell[data-slides]').forEach(cell => {
+    let slides;
+    try { slides = JSON.parse(cell.dataset.slides); } catch { slides = []; }
+    if (!slides.length) return;
+
+    const wrap  = cell.querySelector('.img-wrap');
+    if (!wrap) return;
+    const img   = wrap.querySelector('.thumb');
+    const bar   = wrap.querySelector('.scrub-pos');
+    const info  = wrap.querySelector('.frame-info');
+    const hint  = wrap.querySelector('.scrub-hint');
+
+    const final = img.getAttribute('src');
+    let hasScrubbed = false;
+
+    // preload all frames
+    slides.forEach(s => { const i = new Image(); i.src = s; });
+
+    function seek(ratio) {
+      const idx = Math.min(slides.length - 1, Math.floor(ratio * slides.length));
+      img.src = slides[idx];
+      bar.style.width = ((idx + 1) / slides.length * 100).toFixed(1) + '%';
+      info.textContent = (idx + 1) + '\u202f/\u202f' + slides.length;
+      if (!hasScrubbed) { wrap.classList.add('scrubbed'); hasScrubbed = true; }
+    }
+
+    wrap.addEventListener('mousemove', e => {
+      const r = wrap.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(0.9999, (e.clientX - r.left) / r.width));
+      seek(ratio);
+    });
+
+    wrap.addEventListener('mouseleave', () => {
+      img.src = final;
+      bar.style.width = '100%';
+      info.textContent = '';
+    });
+
+    // mouse wheel scrolls through frames while hovering
+    wrap.addEventListener('wheel', e => {
+      e.preventDefault();
+      const cur  = slides.indexOf(img.getAttribute('src'));
+      const next = Math.max(0, Math.min(slides.length - 1, cur + Math.sign(e.deltaY)));
+      img.src = slides[next];
+      bar.style.width = ((next + 1) / slides.length * 100).toFixed(1) + '%';
+      info.textContent = (next + 1) + '\u202f/\u202f' + slides.length;
+    }, { passive: false });
+  });
+
+})();
+</script>
+</body>
+</html>
+FOOTEREOF
+}
+
+# --------------------------------------------------------------------------- #
+
+_main "$@"

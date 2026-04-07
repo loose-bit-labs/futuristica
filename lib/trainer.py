@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-#############################################################################
-
 from datetime import datetime
 from PIL import Image
 
@@ -18,93 +15,7 @@ from torchvision import models, transforms
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Sine activation for SIREN networks.
-# omega_0 controls the frequency of the first layer — 30.0 is the value
-# from the original SIREN paper (Sitzmann et al. 2020) and works well in
-# practice. Hidden layers use omega_0=1.0 so they don't re-amplify.
-# In GLSL this is just: sin(sum) — single instruction, basically free.
-class SineActivation(torch.nn.Module):
-    def __init__(self, omega_0=30.0):
-        super().__init__()
-        self.omega_0 = omega_0
-
-    def forward(self, x):
-        return torch.sin(self.omega_0 * x)
-# end of class SineActivation
-
-
-# Define a simple neural network model
-# It seems like GLSL get's maxed out anything 32x32 or greater
-# 16x16 seems to work pretty well with 4 layers...
-# Sometimes I've tried 6 but it will probably be too much for smaller
-# webgl hardware (like mobile)
-#
-# activation choices:
-#   "relu"  — original behaviour, piecewise linear, bad at high frequencies
-#   "sine"  — SIREN: sin(omega_0 * x), excellent at high frequencies,
-#             requires siren_init() to be called after construction
-#   "tanh"  — smooth, better than relu for INRs but slower than sine
-class Neuralistica(torch.nn.Module):
-    def __init__(self, input_size=16, output_size=3, hidden_size=16, hidden_count=4, activation="sine"):
-        super().__init__()
-        self.activation = activation
-        self.fullness(input_size, output_size, hidden_size, hidden_count)
-        if activation == "sine":
-            self.siren_init()
-    #end of __init__
-
-    def _make_activation(self, is_first=False):
-        if self.activation == "sine":
-            return SineActivation(omega_0=30.0 if is_first else 1.0)
-        elif self.activation == "tanh":
-            return torch.nn.Tanh()
-        else:  # relu — original behaviour
-            return torch.nn.ReLU()
-
-    def fullness(self, input_size, output_size, hidden_size, hidden_count):
-        layers = []
-        layers.append(torch.nn.Linear(input_size, hidden_size))
-        layers.append(self._make_activation(is_first=True))
-        for _ in range(hidden_count):
-            layers.append(torch.nn.Linear(hidden_size, hidden_size))
-            layers.append(self._make_activation(is_first=False))
-        layers.append(torch.nn.Linear(hidden_size, output_size))
-        # No sigmoid on output — sine networks produce outputs in [-1,1]
-        # naturally. We clamp to [0,1] after. relu/tanh keep sigmoid for compat.
-        if self.activation != "sine":
-            layers.append(torch.nn.Sigmoid())
-        self.layers = torch.nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.layers(x)
-
-    def siren_init(self, omega_0=30.0):
-        """
-        SIREN weight initialisation from Sitzmann et al. 2020.
-        Without this the sine network trains very poorly — the init scheme is
-        what makes SIREN actually work. Called automatically from __init__
-        when activation="sine".
-
-        First linear layer: uniform in [-1/fan_in, 1/fan_in]
-        Hidden linear layers: uniform in [-sqrt(6/fan_in)/omega_0, +sqrt(6/fan_in)/omega_0]
-
-        This preserves the distribution of activations across layers so that
-        the network can represent a wide range of frequencies from the start.
-        """
-        linear_idx = 0
-        for layer in self.layers:
-            if isinstance(layer, torch.nn.Linear):
-                n = layer.weight.shape[1]  # fan_in
-                if linear_idx == 0:
-                    # First layer — wider init so it spans the full input range
-                    torch.nn.init.uniform_(layer.weight, -1.0 / n, 1.0 / n)
-                else:
-                    bound = (6.0 / n) ** 0.5 / omega_0
-                    torch.nn.init.uniform_(layer.weight, -bound, bound)
-                linear_idx += 1
-    # end of siren_init
-
-# end of class Neuralistica
+from model import Neuralistica
 
 
 ##
@@ -128,14 +39,15 @@ class Futuristica:
         self.parser.add_argument("-w", "--ckp",             type=str)
         self.parser.add_argument("-s", "--model_size",      type=int, default=16)
         self.parser.add_argument("-c", "--model_count",     type=int, default=4)
-        self.parser.add_argument("-l", "--loss_fn",         choices=losers, default="mse")
+        self.parser.add_argument("-l", "--loss_fn",         choices=losers, default="l1")
         self.parser.add_argument("-a", "--activation",      choices=["sine", "relu", "tanh"], default="sine")
         self.parser.add_argument("-e", "--mapping",          choices=["polar", "fourier", "legacy"], default="polar")
         self.parser.add_argument("-k", "--colorspace",      choices=["rgb", "ycbcr", "yuv"], default="ycbcr")
         self.parser.add_argument("-f", "--four",            action="store_true")
         self.parser.add_argument("-n", "--no_gui",          action="store_true")
         self.parser.add_argument("--steps",                 type=int, default=0)
-    # end of __init__
+        self.parser.add_argument("-b", "--batch",           type=int, default=32768)
+        self.parser.add_argument("--plateau",               type=int, default=0)
 
 
     def main(self):
@@ -156,7 +68,7 @@ class Futuristica:
 
         self.export_weights(model, self.args.weights)
         self.generate_image(model, self.args.generated)
-    # end of main
+        self.eval_psnr(model)
 
 
     def load_image(self, image_path):
@@ -194,14 +106,12 @@ class Futuristica:
             coords = self.positional_encoding(coords, L=self.args.coding, mapping=self.args.mapping)
 
         # Move data to GPU
-        return (torch.tensor(coords, dtype=torch.float32, device=self.device), 
+        return (torch.tensor(coords, dtype=torch.float32, device=self.device),
                 torch.tensor(colors, dtype=torch.float32, device=self.device))
-    # end of load_image
 
 
     def train(self, coords, colors):
         return self.train_back(coords, colors)
-    # end of train
 
 
     def create_model(self, first=True):
@@ -219,7 +129,6 @@ class Futuristica:
         if self.args.activation == "sine" and first:
             Futuristica.LOG.info("SIREN weight init applied")
         return model
-    # end of create_model
 
 
     def get_loss_function(self, key=None):
@@ -230,8 +139,6 @@ class Futuristica:
             "crossEntropy":  torch.nn.CrossEntropyLoss,
             "bce":           torch.nn.BCELoss,
             "klDiv":         torch.nn.KLDivLoss,
-            #"marginRanking": torch.nn.MarginRankingLoss,
-            #"ctc":           torch.nn.CTCLoss,
             "perceptual":    self.perceptual_loser,
             "hybrid":        self.hybrid_loser,
         }
@@ -250,7 +157,7 @@ class Futuristica:
         best_model      = None
         best_loss       = float('inf')
         imaged_last     = 0
-        imaged_too_soon = 5000  # minimum epochs between checkpoint images
+        imaged_too_soon = 50000  # minimum epochs between checkpoint images
 
         loss_fn   = self.get_loss_function(self.args.loss_fn)()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -263,14 +170,23 @@ class Futuristica:
         Futuristica.LOG.info(f"Training for 5k x {self.args.training} (minutes) -> {epochs}")
 
         # SIREN outputs [-1,1]; colour targets are [0,1] — remap before loss.
-        use_sine = self.args.activation == "sine"
+        use_sine  = self.args.activation == "sine"
+        n_pixels  = coords.shape[0]
+        batch     = min(self.args.batch, n_pixels)  # clamp to dataset size
+        plateau   = self.args.plateau
+        no_improve = 0
 
         for epoch in range(epochs):
+            # random minibatch each step
+            idx = torch.randperm(n_pixels, device=self.device)[:batch]
+            batch_coords = coords[idx]
+            batch_colors = colors[idx]
+
             optimizer.zero_grad()
-            predictions = model(coords)
+            predictions = model(batch_coords)
             if use_sine:
                 predictions = (predictions + 1.0) / 2.0
-            loss = loss_fn(predictions, colors)
+            loss = loss_fn(predictions, batch_colors)
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -281,6 +197,7 @@ class Futuristica:
 
             if loss_v < best_loss:
                 best_loss  = loss_v
+                no_improve = 0
                 best_model = self.create_model(first=False)
                 best_model.load_state_dict(model.state_dict())
                 best_model.cpu()
@@ -290,6 +207,11 @@ class Futuristica:
                     self.export_weights(model, self.args.weights)
                     imaged_last = epoch
                     self.update_plot(epoch)
+            else:
+                no_improve += 1
+                if plateau and no_improve >= plateau:
+                    Futuristica.LOG.info(f"{now}: plateau after {plateau} epochs, stopping")
+                    break
 
             if epoch % 1000 == 0:
                 lr = scheduler.get_last_lr()[0]
@@ -299,11 +221,8 @@ class Futuristica:
         Futuristica.LOG.info(f"Training complete: {best_loss:.6f}")
         best_model.to(self.device)
         return best_model
-    #end of train_back
 
 
-    # save out the results, you can run translate.py 
-    # on the exported model 
     def export_weights(self, model, filename="weights.npz"):
         Futuristica.LOG.info(f"Saving weights to {filename}")
         weights = {}
@@ -311,7 +230,6 @@ class Futuristica:
             weights[name] = param.detach().cpu().numpy()  # Convert to NumPy
         np.savez(filename, **weights)
         Futuristica.LOG.info(f"Saved weights to {filename}")
-    #end of export_weights
 
 
     def load_weights(self, model, filename="weights.npz"):
@@ -327,7 +245,6 @@ class Futuristica:
             param.data = torch.from_numpy(ww).to(param.device)
         Futuristica.LOG.info(f"Loaded weights from {filename}")
         return model
-    #end of load_weights
 
 
     def generate_image(self, model, filename = "generated_image.png", timestamp = False):
@@ -386,10 +303,58 @@ class Futuristica:
         # Save the image
         image.save(filename)
         Futuristica.LOG.info(f"Generated image as {filename}")
-    # end of generated_image
 
-    
-    # convert from "rgbG" 
+
+    def eval_psnr(self, model):
+        """Reconstruct the full image and compute PSNR against the original in RGB [0,1].
+
+        Logged as 'Eval PSNR: XX.XXdB' so grid-html-maker can grep it from train.log.
+        This is a fixed metric independent of the training loss function, making
+        results comparable across l1/mse/huber/etc. runs.
+        """
+        size = self.args.size
+
+        # original image in RGB [0,1]
+        orig = np.array(
+            Image.open(self.args.image).convert("RGB").resize((size, size))
+        ) / 255.0  # (H, W, 3)
+
+        # reconstruct via the model
+        x = np.linspace(-1, 1, size)
+        y = np.linspace(-1, 1, size)
+        xx, yy = np.meshgrid(x, y)
+        inputs = np.stack((xx.flatten(), yy.flatten()), axis=1)
+        if self.args.coding > 0:
+            inputs = self.positional_encoding(inputs, L=self.args.coding, mapping=self.args.mapping)
+
+        with torch.no_grad():
+            t = torch.from_numpy(inputs).float().to(self.device)
+            out = model(t)
+            if self.args.activation == "sine":
+                out = (out + 1.0) / 2.0
+            raw = np.clip(out.cpu().numpy().reshape(size, size, -1), 0.0, 1.0)
+
+        # convert back to RGB [0,1]
+        if self.args.colorspace == "ycbcr":
+            raw = np.clip(np.dot(raw[..., :3],
+                [[1, 0, 1.402], [1, -0.344136, -0.714136], [1, 1.772, 0]]), 0, 1)
+        elif self.args.colorspace == "yuv":
+            raw = np.clip(np.dot(raw,
+                [[1, 0, 1.13983], [1, -0.39465, -0.58060], [1, 2.03211, 0]]), 0, 1)
+
+        if self.args.four:
+            rgb = raw[..., :3]
+            gray = raw[..., 3:4]
+            mean = np.where(np.mean(rgb, axis=-1, keepdims=True) == 0, 1e-6,
+                            np.mean(rgb, axis=-1, keepdims=True))
+            raw = np.clip(rgb * (gray / mean), 0, 1)
+
+        mse = np.mean((orig - raw[..., :3]) ** 2)
+        psnr = 20 * np.log10(1.0 / np.sqrt(mse)) if mse > 0 else float('inf')
+        Futuristica.LOG.info(f"Eval PSNR: {psnr:.2f}dB")
+        return psnr
+
+
     def ten_four(self, outputs, needs_reshaping = True):
         size = self.args.size
         if needs_reshaping:
@@ -407,8 +372,7 @@ class Futuristica:
 
         ratio = grayscale / mean
 
-        return rgb * ratio * 255 
-    # end of ten_four
+        return rgb * ratio * 255
 
 
     def positional_encoding(self, coords, L=3, mapping="polar"):
@@ -550,7 +514,6 @@ class Futuristica:
             ]),
             0, 255
         )
-        # return mat3(1, 0, 1.13983, 1, -0.39465, -0.58060, 1, 2.03211, 0) * color;
 
 
     def create_plot(self):
@@ -558,20 +521,19 @@ class Futuristica:
             self.LOG.info("no gui...")
             return
         plt.ion()
-        
+
         self.fig, (self.ax_loss, self.ax_image) = plt.subplots(1, 2, figsize=(12, 5), num="futuristica")
 
         # Loss plot
         self.ax_loss.set_title("Training Loss Over Time")
         self.ax_loss.set_xlabel("Epoch")
         self.ax_loss.set_ylabel("Loss")
-        
+
         # Image display
         self.ax_image.set_title("Latest Generated Image")
         size = self.args.size
         self.image_plot = self.ax_image.imshow(np.zeros((size, size, 3))) # Placeholder image
-    # end of create_plot
-        
+
 
     def update_plot(self, epoch = -3e3):
         if self.args.no_gui:
@@ -595,13 +557,3 @@ class Futuristica:
         # Redraw canvas
         plt.draw()
         plt.pause(0.1)  # Small pause to allow update
-    # end of update_plot
-
-
-# end of class Futuristica
-
-if __name__ == "__main__":
-    Futuristica().main()
-
-# EOF
-#############################################################################

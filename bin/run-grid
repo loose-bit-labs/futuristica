@@ -1,0 +1,206 @@
+#!/bin/bash
+
+set -e -o pipefail
+
+BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# inherit the repo's pyenv environment so trial subdirs (outside the repo) get the right python
+export PYENV_VERSION=$(cat "${BASE}/../.python-version" 2>/dev/null || echo "")
+
+################################################################################
+# run-grid — sweep training parameters and collect results
+#
+# Usage: ./bin/run-grid [image]
+#   image defaults to images/lenna.png
+#
+# Each trial runs in its own subdirectory under $RUN_DIR/grid-TIMESTAMP/
+# Results summary written there as results.txt
+#
+# Override RUN_DIR (and other vars) via local.conf (gitignored), e.g.:
+#   RUN_DIR=/home/you/data/futuristica/grid-runs
+################################################################################
+
+# defaults — override any of these in local.conf
+CONCURRENCY=2
+TRAINING=20
+SIZE=512
+MODEL_SIZE=16
+CODING=3
+LOSS_FNS="l1 mse huber"
+COLORSPACES="rgb ycbcr"
+MAPPINGS="polar fourier"
+MODEL_COUNTS="4 6 8"
+EXTRAS=""
+RUN_DIR="${BASE}/../grid-run"
+
+[ -f "${BASE}/../local.conf" ] && source "${BASE}/../local.conf"
+
+################################################################################
+
+FUTURISTICA="${BASE}/futuristica"
+TRANSLATE="${BASE}/translate"
+
+_main() {
+    local image=${1:-${BASE}/../images/lenna.png}
+    local image_abs
+    image_abs=$(realpath "${image}")
+
+    if [ ! -f "${image_abs}" ]; then
+        echo "Image not found: ${image_abs}"
+        exit 1
+    fi
+
+    local grid_dir="${RUN_DIR}/grid-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "${RUN_DIR}"
+    mkdir -p "${grid_dir}"
+
+    local results="${grid_dir}/results.txt"
+    printf "%-40s %12s %s\n" "trial" "final_loss" "dir" | tee "${results}"
+    printf '%s\n' "$(printf '─%.0s' {1..70})" | tee -a "${results}"
+
+    # build full trial list
+    local trials=()
+    for loss_fn in ${LOSS_FNS}; do
+        for colorspace in ${COLORSPACES}; do
+            for mapping in ${MAPPINGS}; do
+                for model_count in ${MODEL_COUNTS}; do
+                    trials+=("${loss_fn}|${colorspace}|${mapping}|${model_count}")
+                done
+            done
+        done
+    done
+
+    local total=${#trials[@]}
+    echo "Grid: ${total} trials, concurrency ${CONCURRENCY}, ~$((TRAINING * total / CONCURRENCY / 5000 / 60)) min total"
+    echo "Output: ${grid_dir}/"
+    echo ""
+
+    # run trials with concurrency control
+    local running=0
+    local pids=()
+    local trial_dirs=()
+    local idx=0
+
+    for trial in "${trials[@]}"; do
+        # wait if at concurrency limit
+        while [ "${running}" -ge "${CONCURRENCY}" ]; do
+            _reap_one pids trial_dirs results
+            running=${#pids[@]}
+        done
+
+        IFS='|' read -r loss_fn colorspace mapping model_count <<< "${trial}"
+        idx=$((idx + 1))
+
+        local name="loss${loss_fn}-cs${colorspace}-map${mapping}-layers${model_count}"
+        local trial_dir="${grid_dir}/${name}"
+        mkdir -p "${trial_dir}/images"
+
+        echo "[${idx}/${total}] starting: ${name}"
+
+        _run_trial "${trial_dir}" "${image_abs}" \
+            "${loss_fn}" "${colorspace}" "${mapping}" "${model_count}" \
+            > "${trial_dir}/train.log" 2>&1 &
+
+        pids+=($!)
+        trial_dirs+=("${trial_dir}")
+        running=${#pids[@]}
+    done
+
+    # drain remaining
+    while [ "${#pids[@]}" -gt 0 ]; do
+        _reap_one pids trial_dirs results
+    done
+
+    echo ""
+    echo "All trials complete. Results:"
+    cat "${results}"
+    echo ""
+
+    # find best
+    local best
+    best=$(grep -v '^trial\|^─' "${results}" | sort -k2 -n | head -1)
+    echo "Best: ${best}"
+
+    "${BASE}/grid-html-maker" "${grid_dir}"
+}
+
+
+_run_trial() {
+    local dir=$1
+    local image=$2
+    local loss_fn=$3
+    local colorspace=$4
+    local mapping=$5
+    local model_count=$6
+
+    cd "${dir}"
+
+    "${FUTURISTICA}"            \
+        --weights   weights.npz  \
+        --generated images/output.png \
+        --loss_fn   "${loss_fn}"      \
+        --coding    "${CODING}"       \
+        --training  "${TRAINING}"     \
+        --size      "${SIZE}"         \
+        --image     "${image}"        \
+        --colorspace "${colorspace}"  \
+        --mapping   "${mapping}"      \
+        --model_size "${MODEL_SIZE}"  \
+        --model_count "${model_count}" \
+        --no_gui                      \
+        ${EXTRAS}
+
+    # translate weights to GLSL
+    "${TRANSLATE}" -s               \
+        --coding "${CODING}"        \
+        --colorspace "${colorspace}" \
+        --mapping "${mapping}"      \
+        weights.npz > output.glsl
+
+    cd - > /dev/null
+}
+
+
+# reap one completed child, append its result, remove from tracking arrays
+_reap_one() {
+    local -n _pids=$1
+    local -n _dirs=$2
+    local _results=$3
+
+    local i
+    while true; do
+        for i in "${!_pids[@]}"; do
+            if ! kill -0 "${_pids[$i]}" 2>/dev/null; then
+                local pid=${_pids[$i]}
+                local dir=${_dirs[$i]}
+                local name
+                name=$(basename "${dir}")
+
+                # extract final loss from log
+                local loss
+                loss=$(grep "Training complete:" "${dir}/train.log" 2>/dev/null \
+                       | tail -1 | grep -oP '[\d.]+$' || echo "N/A")
+
+                local status="ok"
+                wait "${pid}" 2>/dev/null || status="FAILED"
+
+                printf "%-40s %12s %s\n" "${name}" "${loss}" "${dir}" \
+                    | tee -a "${_results}"
+
+                [ "${status}" = "FAILED" ] && \
+                    echo "  !! FAILED — see ${dir}/train.log"
+
+                # remove from arrays
+                unset '_pids[$i]'
+                unset '_dirs[$i]'
+                _pids=("${_pids[@]}")
+                _dirs=("${_dirs[@]}")
+                return
+            fi
+        done
+        sleep 5
+    done
+}
+
+
+_main "$@"

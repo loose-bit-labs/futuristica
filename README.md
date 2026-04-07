@@ -1,117 +1,68 @@
-# Salutations! 🧠 📸🖼️
+# Futuristica
+
+Train a tiny SIREN neural network to represent an image, then export it as GLSL
+for [ShaderToy](https://www.shadertoy.com/view/w3l3W4). AI/ML/GLSL party up in here.
 
 ![training image](images/lenna.png)
 
-Everyone likes AI/ML/GLSL so let's have an AI/ML/GLSL party up in here! 🎉🥳🎊🎁
+## Quick start
 
-I'm using 3.10.10 with pyenv. You should find all goodies in requirements.txt
-
-See it in action on [shadertoy#w3l3W4](https://www.shadertoy.com/view/w3l3W4), the loss there was under .004.
-And took about an hour to train.
-
-This [version](https://www.shadertoy.com/view/sflXWr) contrasts the old result with the Siren changes. 
-The result shown is from running almost 24 hours, but the difference as 2-5 hours is indistinguishable.
-The loss was around .000674.
-
-The [shadertoy#WXjGzW](https://www.shadertoy.com/view/WXjGzW) is currently using the "E16" version
-
-# Training Examples 🏋️‍♂️
-
-| ⛩️       | Final                         | Training                      | Stats                                |
-|----------|-------------------------------|-------------------------------|--------------------------------------|
-| Siren    | ![sn](images/examples/sn.png) | ![sn](images/examples/sn.gif) | loss:.000674, claude siren, 8x16     |
-| E16      | ![lF](images/examples/lF.png) | ![lF](images/examples/lF.gif) | loss:.000383, new encoding, long run |
-| Encoding | ![l8](images/examples/l8.png) | ![l8](images/examples/l8.gif) | loss:.003700, encoding:3, 60m, ckp   |
-| Raw      | ![b4](images/examples/b4.png) | ![b4](images/examples/b4.gif) | loss:.006588, encoding:0, 10m        |
-
-The "E16" encoding using a 2d -> 16d encoding 
-
-In terms of generated code, using a 16 layer wide model with 4 layers seems to be the sweet spot...
-
-## Further Experiments
-
-Here are some things I've tried or want to try or have failed to try:
-
-1.  better image pre-processing (x)
-2.  varying the test inputs (/)
-3.  changing around the loss function (/)
-4.  tweaks to the training method  (/)
-5.  try it on different images (/)
-6.  add ability t reload weights from a prior run (/)
-7.  train the encoder instead of having a static method
-8.  modify the model architecture (attention?)
-9.  try smaller models (/)
-10. conditioning (?)
-11. more optimized generated code (/)
-
-# Train the model 🏋🏽🔥💪🏼🎧
-
-All you need is the input image. Here is an example specifying some output files as well
-
-```
-time ./futuristica.py --weights lenna.npz --generated output.png --training 30 --coding 2 --image images/lenna.png 
+```bash
+pip install -r requirements.txt
+bin/run-training images/lenna.png
 ```
 
-On my rtx 3060, training for 30 (x 5000) epochs takes about 30 minutes.
+Output lands in `run/training-TIMESTAMP/`. The latest run is symlinked as `last/`.
 
-You can also try `--ckp futuristica.npz` to start from a trained model
+## Training examples
 
-I strongly recommend using `run-training.sh` to keep thing organized, see below.
+| Run      | Final                         | Training                      | Stats                          |
+|----------|-------------------------------|-------------------------------|--------------------------------|
+| E16      | ![lF](images/examples/lF.png) | ![lF](images/examples/lF.gif) | loss 0.000383, long run        |
+| Encoding | ![l8](images/examples/l8.png) | ![l8](images/examples/l8.gif) | loss 0.003700, 60m, ckp        |
+| Raw      | ![b4](images/examples/b4.png) | ![b4](images/examples/b4.gif) | loss 0.006588, encoding:0, 10m |
 
-## Stuck Training 😩😮‍💨
+## Layout
 
-If you start to see a line like this: `Epoch 265161: PUNT: 5001 is too long!`, then training is probably stuck. 
-You'll either need to tweak the model or the code or just reroll and hope the RNG loves you better.
+```
+bin/              executables — futuristica, translate, trainspotting, run-*
+lib/              Python classes (one per file) + based.sh
+etc/              local.conf.example — copy to local.conf at repo root to configure
+dox/              notes, experiments, architecture
+images/           sample training images
+```
 
-During training it will probably drop png's and weights.npz files so you should be ok to kill it but find the
-weights file first!
+## Binaries
 
-# Generate GLSL for ShaderToy 🌗🧸🧩🚂
+| Command               | What it does                                      |
+|-----------------------|---------------------------------------------------|
+| `bin/futuristica`     | Train the model                                   |
+| `bin/translate`       | Export weights → GLSL for ShaderToy               |
+| `bin/run-training`    | Organised training run (timestamped output dir)   |
+| `bin/run-grid`        | Parameter sweep across loss/colorspace/mapping    |
+| `bin/trainspotting`   | GUI image viewer for watching training (needs X11)|
+| `bin/historic-output` | Build and play a timelapse mp4 of a run           |
 
-This will dump a big bunch spew: `./translate.py lenna.npz` 
+## Direct usage
 
-Note: the `run-training.sh` will take care of this for you.
+```bash
+# train
+bin/futuristica --image images/lenna.png --training 30 --weights lenna.npz --no_gui
 
-# Tweak the model 🛠️🧠💡🤓🤔💪🏻
+# export GLSL
+bin/translate lenna.npz
 
-Edit futuristica.py and change the definition of layers in the MLP class at the top.
+# parameter sweep
+bin/run-grid images/lenna.png
+```
 
-# Helper Scripts 🤝🤗🛟🚢🆘🛟🚨📢
+## Local config
 
-The script `run-training.sh` helps save output from training runs into
-a directory for each run.  It's there to help keep things organized.
+Copy `etc/local.conf.example` to `local.conf` at the repo root to set output
+directories and per-session training knobs without touching the scripts:
 
-Each training will have it's output in a timestamped directory under
-./run, just trying running it... Some info bits might not work until
-you deal with the dependencies, but training should still work.
+```bash
+cp etc/local.conf.example local.conf
+```
 
-Note: it will also create a symbolic link from the main directory to
-the latest training run for convenience / laziness.
-
-Note: futuristica.py now has matlib integration to show realtime plot and most recent image,
-so you may not see much use in the helpers.
-
-You can use TrainSpotting.py but it can be buggy cuz tk is buggy.
-
-The script `historic-output.sh` will 
-- look at the output png's from training
-- display the latest one
-- create an mp4 of all of them
-- display the mp4 as a time lapse
-I wrote it cuz it's nifty.
-
-## Script Dependencies 🔗⚓
-
-To run the support scripts you'll need some tools installed or to edit them to use your preffered
-
-I use an ancient, crusty program called "xv" which you can replace with any thing else that can display a png.
-
-The `historic-output.sh` script has a bit more odds and ends in addition to "xv":
-- ffmpeg, to create an mp4 from the training output videos
-- mplayer to display the mp4
-
-# Further Reading
-
-https://medium.com/deepfail/implementing-jpeg-compression-in-pytorch-b0a830889f59
-https://pytorch.org/tutorials/intermediate/transformer_building_blocks.html
-https://www.geeksforgeeks.org/pytorch-loss-functions/
+See `dox/notes.md` for experiments, architecture notes, and SSH/headless tips.

@@ -1,0 +1,34 @@
+# Copy this to local.conf at the repo root (gitignored) and uncomment/edit.
+# Sourced by bin/run-grid and bin/run-training after their defaults.
+
+# ---- output directories -------------------------------------------------- #
+
+# TRAIN_DIR=/home/you/data/futuristica/training-runs
+# RUN_DIR=/home/you/data/futuristica/grid-runs
+
+# ---- run-grid knobs ------------------------------------------------------- #
+
+# CONCURRENCY=4         # parallel trials — match your GPU count
+# TRAINING=151          # x5000 epochs per trial (~30min on 4070)
+# SIZE=512              # image size (square)
+# MODEL_SIZE=16         # layer width — 16 is the sweet spot; wider = heavier GLSL
+# CODING=3              # positional encoding depth (2d -> 16d at coding=3)
+# EXTRAS="--four"       # extra flags passed to futuristica; --four adds 4th channel
+
+# grid axes — space-separated lists, all combinations are swept
+# LOSS_FNS="l1 mse huber"
+# COLORSPACES="rgb ycbcr"
+# MAPPINGS="polar fourier"
+# MODEL_COUNTS="4 6 8"
+
+# ---- run-training knobs -------------------------------------------------- #
+
+# training=151          # x5000 epochs (~30min on 4070)
+# size=512
+# colorspace="ycbcr"    # ycbcr tends to beat rgb for most images
+# loss_fn="l1"          # l1 | mse | huber | bce | klDiv | perceptual | hybrid
+# model_size=16
+# model_count=4         # layers — more = sharper but heavier GLSL (mobile struggles >4)
+# coding=3
+# extras="--four"
+# ckp=""                # path to .npz to resume from, e.g. ckp="${BASE}/../zed.npz"
