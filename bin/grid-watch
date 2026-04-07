@@ -19,9 +19,13 @@ _main() {
     local interval=${2:-15}
 
     if [ -z "${grid_dir}" ]; then
-        local run_dir="${RUN_DIR:-${BASE}/../grid-run}"
-        grid_dir=$(ls -td "${run_dir}"/grid-* 2>/dev/null | head -1)
-        [ -z "${grid_dir}" ] && { echo "Usage: $0 <grid-dir> [interval]" >&2; exit 1; }
+        if find "${PWD}" -maxdepth 1 -mindepth 1 -type d | grep -q .; then
+            grid_dir="${PWD}"
+        else
+            local run_dir="${RUN_DIR:-${BASE}/../grid-run}"
+            grid_dir=$(ls -td "${run_dir}"/grid-* 2>/dev/null | head -1)
+            [ -z "${grid_dir}" ] && { echo "Usage: $0 <grid-dir> [interval]" >&2; exit 1; }
+        fi
     fi
 
     grid_dir=$(realpath "${grid_dir}")
