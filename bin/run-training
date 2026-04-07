@@ -51,7 +51,7 @@ _run_training_main() {
 	echo "Training completed"
 
 	# -s flag only works for model_size=16
-	"${BASE}/translate" -s --coding ${coding} --colorspace ${colorspace} weights.npz > output.glsl
+	"${BASE}/translate" --coding ${coding} --colorspace ${colorspace} weights.npz > output.glsl
 
 	ls -lathr ./*.*
 	echo "output is in ${PWD}"
