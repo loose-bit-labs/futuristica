@@ -1,7 +1,9 @@
 # Futuristica
 
 Train a tiny SIREN neural network to represent an image, then export it as GLSL
-for [ShaderToy](https://www.shadertoy.com/view/w3l3W4). AI/ML/GLSL party up in here.
+for [ShaderToy](https://www.shadertoy.com/view/sflXWr).  
+AI/ML/GLSL party up in here.
+Older [ShaderToy version](https://www.shadertoy.com/view/w3l3W4). 
 
 ![training image](images/lenna.png)
 
