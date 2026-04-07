@@ -164,7 +164,6 @@ _render() {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="${interval}">
 <title>grid-watch ${ts}</title>
 <style>
 :root {
@@ -337,7 +336,9 @@ HTMLEOF
 </div></div>
 
 <script>
-(function () {
+const INTERVAL = ${interval};
+
+function init() {
   const MIN = ${min_loss}, MAX = ${max_loss};
   function lossColor(v) {
     if (isNaN(v)) return '#888';
@@ -391,7 +392,21 @@ HTMLEOF
       info.textContent = (next + 1) + '\u202f/\u202f' + slides.length;
     }, { passive: false });
   });
-})();
+}
+
+init();
+
+async function liveRefresh() {
+  try {
+    const r   = await fetch(location.pathname + '?t=' + Date.now());
+    const txt = await r.text();
+    const doc = new DOMParser().parseFromString(txt, 'text/html');
+    document.body.innerHTML = doc.body.innerHTML;
+    init();
+  } catch (_) {}
+  setTimeout(liveRefresh, INTERVAL * 1000);
+}
+setTimeout(liveRefresh, INTERVAL * 1000);
 </script>
 </body>
 </html>
