@@ -36,7 +36,8 @@ class MetaTrainer:
 
     def main(self):
         p = argparse.ArgumentParser(description="Reptile meta-trainer for SIREN init")
-        p.add_argument("images_dir",              type=str,   help="directory tree of training images")
+        p.add_argument("images_dir",              type=str,   nargs="?", help="directory tree of training images")
+        p.add_argument("--image_list",            type=str,   help="text file with one image path per line (alternative to images_dir)")
         p.add_argument("-o", "--output",          type=str,   default="meta_init.npz")
         p.add_argument("--outer_steps",           type=int,   default=2000)
         p.add_argument("--inner_steps",           type=int,   default=16)
@@ -59,8 +60,15 @@ class MetaTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.LOG.info(f"device: {self.device}")
 
-        images = self._collect_images(self.args.images_dir)
-        self.LOG.info(f"dataset: {len(images)} images in {self.args.images_dir}")
+        if self.args.image_list:
+            with open(self.args.image_list) as f:
+                images = [l.strip() for l in f if l.strip() and os.path.isfile(l.strip())]
+            self.LOG.info(f"dataset: {len(images)} images from {self.args.image_list}")
+        elif self.args.images_dir:
+            images = self._collect_images(self.args.images_dir)
+            self.LOG.info(f"dataset: {len(images)} images in {self.args.images_dir}")
+        else:
+            raise RuntimeError("provide images_dir or --image_list")
 
         model = self._make_model()
         if self.args.ckp:
