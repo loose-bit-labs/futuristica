@@ -37,7 +37,7 @@ _main() {
     echo "" >&2
 
     while true; do
-        _render "${grid_dir}" "${interval}" > "${out}"
+        _render "${grid_dir}" "${interval}" > "${out}.tmp" && mv "${out}.tmp" "${out}"
         local launched done_count expected
         launched=$(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | wc -l)
         done_count=$(grep -rl "Training complete:" "${grid_dir}"/*/train.log 2>/dev/null | wc -l || true)
