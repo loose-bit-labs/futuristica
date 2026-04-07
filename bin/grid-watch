@@ -35,10 +35,12 @@ _main() {
     while true; do
         _render "${grid_dir}" "${interval}" > "${out}"
         # count for the status line
-        local total done_count
-        total=$(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | wc -l)
+        local launched done_count expected
+        launched=$(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | wc -l)
         done_count=$(grep -rl "Training complete:" "${grid_dir}"/*/train.log 2>/dev/null | wc -l || true)
-        printf "\r[%s] %d/%d complete — %s" "$(date +%H:%M:%S)" "${done_count}" "${total}" "${out}" >&2
+        expected=$(cat "${grid_dir}/.total" 2>/dev/null || echo "${launched}")
+        printf "\r[%s] %d/%d complete, %d/%d launched — %s" \
+            "$(date +%H:%M:%S)" "${done_count}" "${expected}" "${launched}" "${expected}" "${out}" >&2
         sleep "${interval}"
     done
 }
@@ -57,7 +59,9 @@ _render() {
         trial_dirs+=("$d")
     done < <(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | sort)
 
-    local total=${#trial_dirs[@]}
+    local launched=${#trial_dirs[@]}
+    local total
+    total=$(cat "${grid_dir}/.total" 2>/dev/null || echo "${launched}")
     local n_done=0 n_running=0 n_pending=0 n_failed=0
 
     # per-trial data arrays (bash 3 compat: use parallel arrays keyed by index)
@@ -207,7 +211,7 @@ h1   { color: var(--accent); font-size: 1rem; margin-bottom: .4rem; }
     <span class="running">⟳ ${n_running} running</span>
     <span class="pending">· ${n_pending} pending</span>
     $([ "$n_failed" -gt 0 ] && echo "<span class=\"failed\">✗ ${n_failed} failed</span>")
-    <span style="color:var(--muted)">${total} total</span>
+    <span style="color:var(--muted)">${launched}/${total} launched</span>
   </div>
 </div>
 

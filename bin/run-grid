@@ -71,6 +71,7 @@ _main() {
     done
 
     local total=${#trials[@]}
+    echo "${total}" > "${grid_dir}/.total"
     echo "Grid: ${total} trials, concurrency ${CONCURRENCY}, ~$((TRAINING * total / CONCURRENCY / 5000 / 60)) min total"
     echo "Output: ${grid_dir}/"
     echo ""
