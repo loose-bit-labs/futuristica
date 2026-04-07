@@ -7,3 +7,4 @@ run/
 last
 *.npz
 *.glsl
+resume-claude.sh
