@@ -34,7 +34,6 @@ _main() {
 
     while true; do
         _render "${grid_dir}" "${interval}" > "${out}"
-        # count for the status line
         local launched done_count expected
         launched=$(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | wc -l)
         done_count=$(grep -rl "Training complete:" "${grid_dir}"/*/train.log 2>/dev/null | wc -l || true)
@@ -53,64 +52,59 @@ _render() {
     local ts
     ts=$(basename "${grid_dir}")
 
-    # collect trial dirs and their status
     local trial_dirs=()
-    while IFS= read -r d; do
-        trial_dirs+=("$d")
-    done < <(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | sort)
+    while IFS= read -r d; do trial_dirs+=("$d"); done \
+        < <(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | sort)
 
     local launched=${#trial_dirs[@]}
     local total
     total=$(cat "${grid_dir}/.total" 2>/dev/null || echo "${launched}")
-    local n_done=0 n_running=0 n_pending=0 n_failed=0
 
-    # per-trial data arrays (bash 3 compat: use parallel arrays keyed by index)
-    local -a t_name t_status t_loss t_psnr t_img t_progress
+    local n_done=0 n_running=0 n_pending=0 n_failed=0
+    local -a t_name t_fn t_cs t_mp t_ly t_status t_loss t_psnr t_img t_slides t_progress
 
     for i in "${!trial_dirs[@]}"; do
-        local d="${trial_dirs[$i]}"
-        local name
+        local d="${trial_dirs[$i]}" name log latest_img
         name=$(basename "$d")
         t_name[$i]=$name
+        t_fn[$i]=$(sed 's/^loss\([^-]*\).*/\1/' <<< "$name")
+        t_cs[$i]=$(sed 's/.*-cs\([^-]*\).*/\1/' <<< "$name")
+        t_mp[$i]=$(sed 's/.*-map\([^-]*\).*/\1/' <<< "$name")
+        t_ly[$i]=$(sed 's/.*-layers\([0-9]*\)$/\1/' <<< "$name")
+        log="${d}/train.log"
 
-        local log="${d}/train.log"
-        local latest_img
         latest_img=$(ls -t "${d}/images/output-"*.png "${d}/images/output.png" 2>/dev/null | head -1 || true)
-        t_img[$i]="${latest_img:+$(basename "$(dirname "$latest_img")" )/$(basename "$latest_img")}"
-        # make relative to grid_dir
         [ -n "${latest_img}" ] && t_img[$i]="${name}/images/$(basename "$latest_img")"
 
+        local arr="[" sep=""
+        for img in $(ls -v "${d}/images/output-"*.png 2>/dev/null); do
+            arr="${arr}${sep}\"${name}/images/$(basename "$img")\""
+            sep=","
+        done
+        [ -f "${d}/images/output.png" ] && arr="${arr}${sep}\"${name}/images/output.png\""
+        t_slides[$i]="${arr}]"
+
         if [ ! -f "$log" ]; then
-            t_status[$i]="pending"
-            t_loss[$i]=""; t_psnr[$i]=""; t_progress[$i]=""
+            t_status[$i]="pending"; t_loss[$i]=""; t_psnr[$i]=""; t_progress[$i]=""
             n_pending=$(( n_pending + 1 ))
         elif grep -q "Training complete:" "$log" 2>/dev/null; then
-            local loss psnr
-            loss=$(grep "Training complete:" "$log" | tail -1 | grep -oP '[\d.]+$' || echo "?")
-            psnr=$(grep "Eval PSNR:" "$log" 2>/dev/null | tail -1 | grep -oP '[\d.]+(?=dB)' || true)
-            # check for post-training errors
+            t_loss[$i]=$(grep "Training complete:" "$log" | tail -1 | grep -oP '[\d.]+$' || echo "?")
+            t_psnr[$i]=$(grep "Eval PSNR:" "$log" 2>/dev/null | tail -1 | grep -oP '[\d.]+(?=dB)' || true)
+            t_progress[$i]=""
             if grep -q "Traceback\|Error:" "$log" 2>/dev/null && \
                [ "$(tail -5 "$log" | grep -c "Traceback\|Error:")" -gt 0 ]; then
-                t_status[$i]="failed"
-                n_failed=$(( n_failed + 1 ))
+                t_status[$i]="failed"; n_failed=$(( n_failed + 1 ))
             else
-                t_status[$i]="done"
-                n_done=$(( n_done + 1 ))
+                t_status[$i]="done"; n_done=$(( n_done + 1 ))
             fi
-            t_loss[$i]=$loss
-            t_psnr[$i]=${psnr:-}
-            t_progress[$i]=""
         elif grep -q "Traceback\|Error:" "$log" 2>/dev/null; then
-            t_status[$i]="failed"
-            t_loss[$i]=""; t_psnr[$i]=""
+            t_status[$i]="failed"; t_loss[$i]=""; t_psnr[$i]=""
             t_progress[$i]=$(tail -1 "$log" 2>/dev/null | cut -c1-60)
             n_failed=$(( n_failed + 1 ))
         else
             t_status[$i]="running"
-            # last epoch line
-            local prog
-            prog=$(grep -oP 'Epoch \d+\[\d+%\].*Loss: [\d.]+' "$log" 2>/dev/null | tail -1 || true)
-            t_progress[$i]="${prog:-starting…}"
+            t_progress[$i]=$(grep -oP 'Epoch \d+\[\d+%\].*Loss: [\d.]+' "$log" 2>/dev/null | tail -1 || true)
+            t_progress[$i]="${t_progress[$i]:-starting…}"
             t_loss[$i]=$(grep "Training complete:\|Loss:" "$log" 2>/dev/null \
                 | tail -1 | grep -oP '[\d.]+$' || true)
             t_psnr[$i]=""
@@ -120,6 +114,48 @@ _render() {
 
     local pct=0
     [ "$total" -gt 0 ] && pct=$(( n_done * 100 / total ))
+
+    # build matrix axes — sort configs by best PSNR (or negated loss) descending
+    declare -A cfg_best layers_seen idx_of
+    for i in "${!t_name[@]}"; do
+        local cfg="${t_fn[$i]}|${t_cs[$i]}|${t_mp[$i]}"
+        layers_seen[${t_ly[$i]}]=1
+        idx_of[${t_name[$i]}]=$i
+        local sk=""
+        [ -n "${t_psnr[$i]}" ] && sk="${t_psnr[$i]}"
+        if [ -z "$sk" ] && [ -n "${t_loss[$i]}" ]; then
+            sk=$(echo "-${t_loss[$i]}" | bc -l 2>/dev/null || true)
+        fi
+        if [ -n "$sk" ]; then
+            local cur="${cfg_best[$cfg]:-}"
+            if [ -z "$cur" ] || (( $(echo "$sk > $cur" | bc -l 2>/dev/null || echo 0) )); then
+                cfg_best[$cfg]=$sk
+            fi
+        else
+            [ -z "${cfg_best[$cfg]}" ] && cfg_best[$cfg]="-9999"
+        fi
+    done
+
+    local sorted_cfgs=()
+    while IFS= read -r e; do sorted_cfgs+=("${e#*|}"); done < <(
+        for cfg in "${!cfg_best[@]}"; do
+            printf '%s|%s\n' "${cfg_best[$cfg]}" "$cfg"
+        done | sort -t'|' -k1 -rn
+    )
+
+    local sorted_layers=()
+    while IFS= read -r l; do sorted_layers+=("$l"); done \
+        < <(printf '%s\n' "${!layers_seen[@]}" | sort -n)
+
+    local ncols=${#sorted_layers[@]}
+
+    local min_loss=9999 max_loss=0
+    for i in "${!t_loss[@]}"; do
+        local lv="${t_loss[$i]}"
+        [ -z "$lv" ] && continue
+        (( $(echo "$lv < $min_loss" | bc -l 2>/dev/null || echo 0) )) && min_loss=$lv
+        (( $(echo "$lv > $max_loss" | bc -l 2>/dev/null || echo 0) )) && max_loss=$lv
+    done
 
     cat << HTMLEOF
 <!DOCTYPE html>
@@ -134,6 +170,7 @@ _render() {
   --border: #2a2a2a; --text: #ddd; --muted: #555;
   --done: #4a4; --running: #a84; --pending: #446; --failed: #a44;
   --accent: #5af;
+  --cell-w: 190px; --img-h: 160px; --label-w: 150px;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: ui-monospace, "Fira Mono", monospace; background: var(--bg);
@@ -151,31 +188,66 @@ h1   { color: var(--accent); font-size: 1rem; margin-bottom: .4rem; }
 .counts .pending { color: var(--pending); }
 .counts .failed  { color: var(--failed); }
 
-.grid { display: flex; flex-wrap: wrap; gap: 6px; }
-
-.card {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  width: 180px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
+.matrix-wrap { overflow-x: auto; }
+.matrix {
+  display: grid;
+  grid-template-columns: var(--label-w) repeat(${ncols}, var(--cell-w));
+  gap: 3px;
+  width: max-content;
 }
-.card.done    { border-color: #2a4a2a; }
-.card.running { border-color: #4a3a1a; animation: pulse 2s ease-in-out infinite; }
-.card.failed  { opacity: .5; border-color: #4a1a1a; }
-.card.pending { opacity: .35; }
+
+.col-head {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;
+  padding: .4rem .5rem; text-align: center; font-size: .75rem;
+  color: var(--accent); letter-spacing: .04em;
+  position: sticky; top: 0; z-index: 10;
+}
+.corner { background: var(--bg); position: sticky; top: 0; left: 0; z-index: 20; }
+
+.cfg-label {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;
+  padding: .5rem .6rem; display: flex; flex-direction: column;
+  justify-content: center; gap: .15rem;
+  position: sticky; left: 0; z-index: 5;
+}
+.cfg-label .fn { color: #e8a; font-weight: 600; }
+.cfg-label .cs { color: #ae8; }
+.cfg-label .mp { color: #8ae; }
+
+.cell {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;
+  display: flex; flex-direction: column; overflow: hidden; position: relative;
+}
+.cell.done    { border-color: #2a4a2a; }
+.cell.running { border-color: #4a3a1a; animation: pulse 2s ease-in-out infinite; }
+.cell.failed  { opacity: .45; border-color: #4a1a1a; }
+.cell.pending { opacity: .3; }
 
 @keyframes pulse {
   0%, 100% { border-color: #4a3a1a; }
   50%       { border-color: #8a6a2a; }
 }
 
-.thumb-wrap { position: relative; height: 140px; background: #111; flex-shrink: 0; }
-.thumb-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.thumb-wrap .no-img { display: flex; align-items: center; justify-content: center;
-                      height: 100%; color: var(--muted); font-size: .7rem; }
+.img-wrap {
+  position: relative; width: 100%; height: var(--img-h);
+  overflow: hidden; cursor: ew-resize; flex-shrink: 0;
+}
+.img-wrap img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+  user-select: none; -webkit-user-drag: none;
+}
+.no-img {
+  display: flex; align-items: center; justify-content: center;
+  height: var(--img-h); color: var(--muted); font-size: .7rem;
+}
+.scrub-bar { position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: rgba(255,255,255,.08); }
+.scrub-pos { height: 100%; width: 100%; background: var(--accent); transition: width .05s linear; }
+.frame-info {
+  position: absolute; top: 4px; right: 5px; font-size: .6rem;
+  color: rgba(255,255,255,.6); background: rgba(0,0,0,.55);
+  padding: 1px 4px; border-radius: 3px; opacity: 0; transition: opacity .1s;
+}
+.img-wrap:hover .frame-info { opacity: 1; }
 
 .badge {
   position: absolute; top: 4px; left: 4px;
@@ -187,14 +259,10 @@ h1   { color: var(--accent); font-size: 1rem; margin-bottom: .4rem; }
 .badge.failed  { background: var(--failed);  color: #fff; }
 .badge.pending { background: var(--pending); color: #aaf; }
 
-.card-body { padding: .35rem .4rem; flex: 1; }
-.card-name { font-size: .65rem; color: #888; word-break: break-all;
-             margin-bottom: .25rem; line-height: 1.4; }
-.card-name .fn  { color: #e8a; } .card-name .cs { color: #ae8; }
-.card-name .mp  { color: #8ae; } .card-name .ly { color: #a8e; }
-.card-loss { font-size: .8rem; font-weight: 600; color: #bbb; }
-.card-psnr { font-size: .7rem; color: #6d6; margin-top: .1rem; }
-.card-prog { font-size: .6rem; color: var(--muted); margin-top: .2rem;
+.cell-footer { padding: .3rem .4rem; flex-shrink: 0; }
+.loss-val { font-size: .8rem; font-weight: 600; color: #bbb; }
+.psnr-val { font-size: .7rem; color: #6d6; }
+.cell-prog { font-size: .6rem; color: var(--muted); margin-top: .15rem;
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
@@ -215,60 +283,114 @@ h1   { color: var(--accent); font-size: 1rem; margin-bottom: .4rem; }
   </div>
 </div>
 
-<div class="grid">
+<div class="matrix-wrap"><div class="matrix">
+  <div class="corner col-head"></div>
 HTMLEOF
 
-    # emit cards — running first, then done (sorted by loss), then pending, then failed
-    local order=()
-    # running
-    for i in "${!t_status[@]}"; do [ "${t_status[$i]}" = "running" ] && order+=($i); done
-    # done sorted by loss ascending
-    local done_indices=()
-    for i in "${!t_status[@]}"; do [ "${t_status[$i]}" = "done" ] && done_indices+=($i); done
-    while IFS= read -r i; do order+=("$i"); done < <(
-        for i in "${done_indices[@]}"; do printf '%s %s\n' "${t_loss[$i]:-9}" "$i"; done \
-        | sort -k1 -n | awk '{print $2}'
-    )
-    # pending
-    for i in "${!t_status[@]}"; do [ "${t_status[$i]}" = "pending" ] && order+=($i); done
-    # failed
-    for i in "${!t_status[@]}"; do [ "${t_status[$i]}" = "failed" ] && order+=($i); done
+    for ly in "${sorted_layers[@]}"; do
+        echo "  <div class=\"col-head\">${ly} layers</div>"
+    done
 
-    for i in "${order[@]}"; do
-        local name="${t_name[$i]}"
-        local status="${t_status[$i]}"
-        local loss="${t_loss[$i]}"
-        local psnr="${t_psnr[$i]}"
-        local img="${t_img[$i]}"
-        local prog="${t_progress[$i]}"
+    for cfg in "${sorted_cfgs[@]}"; do
+        IFS='|' read -r fn cs mp <<< "$cfg"
+        echo "  <div class=\"cfg-label\"><span class=\"fn\">${fn}</span><span class=\"cs\">${cs}</span><span class=\"mp\">${mp}</span></div>"
 
-        # parse name parts
-        local fn cs mp ly
-        fn=$(sed 's/^loss\([^-]*\).*/\1/' <<< "$name")
-        cs=$(sed 's/.*-cs\([^-]*\).*/\1/' <<< "$name")
-        mp=$(sed 's/.*-map\([^-]*\).*/\1/' <<< "$name")
-        ly=$(sed 's/.*-layers\([0-9]*\)$/\1/' <<< "$name")
+        for ly in "${sorted_layers[@]}"; do
+            local n="loss${fn}-cs${cs}-map${mp}-layers${ly}"
+            local idx="${idx_of[$n]:-}"
 
-        echo "  <div class=\"card ${status}\">"
-        echo "    <div class=\"thumb-wrap\">"
-        if [ -n "$img" ]; then
-            echo "      <img src=\"${img}\" loading=\"lazy\">"
-        else
-            echo "      <div class=\"no-img\">no image yet</div>"
-        fi
-        echo "      <div class=\"badge ${status}\">${status}</div>"
-        echo "    </div>"
-        echo "    <div class=\"card-body\">"
-        echo "      <div class=\"card-name\"><span class=\"fn\">${fn}</span> <span class=\"cs\">${cs}</span> <span class=\"mp\">${mp}</span> <span class=\"ly\">${ly}L</span></div>"
-        [ -n "$loss" ] && echo "      <div class=\"card-loss\">${loss}</div>"
-        [ -n "$psnr" ] && echo "      <div class=\"card-psnr\">${psnr} dB</div>"
-        [ -n "$prog" ] && echo "      <div class=\"card-prog\">${prog}</div>"
-        echo "    </div>"
-        echo "  </div>"
+            if [ -z "$idx" ]; then
+                echo "  <div class=\"cell pending\"><div class=\"no-img\">not launched</div></div>"
+                continue
+            fi
+
+            local status="${t_status[$idx]}"
+            local loss="${t_loss[$idx]}"
+            local psnr="${t_psnr[$idx]}"
+            local img="${t_img[$idx]}"
+            local slides="${t_slides[$idx]}"
+            local prog="${t_progress[$idx]}"
+
+            echo "  <div class=\"cell ${status}\" data-slides='${slides}'>"
+            if [ -n "$img" ]; then
+                echo "    <div class=\"img-wrap\">"
+                echo "      <img class=\"thumb\" src=\"${img}\" loading=\"lazy\" draggable=\"false\">"
+                echo "      <div class=\"scrub-bar\"><div class=\"scrub-pos\"></div></div>"
+                echo "      <div class=\"frame-info\"></div>"
+                echo "    </div>"
+            else
+                echo "    <div class=\"no-img\">${status}</div>"
+            fi
+            echo "      <div class=\"badge ${status}\">${status}</div>"
+            echo "    <div class=\"cell-footer\">"
+            [ -n "$loss" ] && echo "      <span class=\"loss-val\" data-raw=\"${loss}\">${loss}</span>"
+            [ -n "$psnr" ] && echo "      <span class=\"psnr-val\" data-psnr=\"${psnr}\"> ${psnr} dB</span>"
+            [ -n "$prog" ] && echo "      <div class=\"cell-prog\">${prog}</div>"
+            echo "    </div>"
+            echo "  </div>"
+        done
     done
 
     cat << FOOTEREOF
-</div>
+</div></div>
+
+<script>
+(function () {
+  const MIN = ${min_loss}, MAX = ${max_loss};
+  function lossColor(v) {
+    if (isNaN(v)) return '#888';
+    const t = Math.max(0, Math.min(1, (v - MIN) / (MAX - MIN || 1)));
+    return \`hsl(\${Math.round(120 * (1 - t))}, 65%, 48%)\`;
+  }
+  document.querySelectorAll('.loss-val[data-raw]').forEach(el => {
+    el.style.color = lossColor(parseFloat(el.dataset.raw));
+  });
+
+  const psnrEls = [...document.querySelectorAll('.psnr-val[data-psnr]')];
+  if (psnrEls.length) {
+    const vals = psnrEls.map(e => parseFloat(e.dataset.psnr)).filter(v => !isNaN(v));
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    psnrEls.forEach(el => {
+      const t = Math.max(0, Math.min(1, (parseFloat(el.dataset.psnr) - lo) / (hi - lo || 1)));
+      el.style.color = \`hsl(\${Math.round(120 * t)}, 65%, 52%)\`;
+    });
+  }
+
+  document.querySelectorAll('.cell[data-slides]').forEach(cell => {
+    let slides;
+    try { slides = JSON.parse(cell.dataset.slides); } catch { slides = []; }
+    if (!slides.length) return;
+    const wrap = cell.querySelector('.img-wrap');
+    if (!wrap) return;
+    const img  = wrap.querySelector('.thumb');
+    const bar  = wrap.querySelector('.scrub-pos');
+    const info = wrap.querySelector('.frame-info');
+    const final = img.getAttribute('src');
+    slides.forEach(s => { const i = new Image(); i.src = s; });
+    function seek(ratio) {
+      const idx = Math.min(slides.length - 1, Math.floor(ratio * slides.length));
+      img.src = slides[idx];
+      bar.style.width = ((idx + 1) / slides.length * 100).toFixed(1) + '%';
+      info.textContent = (idx + 1) + '\u202f/\u202f' + slides.length;
+    }
+    wrap.addEventListener('mousemove', e => {
+      const r = wrap.getBoundingClientRect();
+      seek(Math.max(0, Math.min(0.9999, (e.clientX - r.left) / r.width)));
+    });
+    wrap.addEventListener('mouseleave', () => {
+      img.src = final; bar.style.width = '100%'; info.textContent = '';
+    });
+    wrap.addEventListener('wheel', e => {
+      e.preventDefault();
+      const cur  = slides.indexOf(img.getAttribute('src'));
+      const next = Math.max(0, Math.min(slides.length - 1, cur + Math.sign(e.deltaY)));
+      img.src = slides[next];
+      bar.style.width = ((next + 1) / slides.length * 100).toFixed(1) + '%';
+      info.textContent = (next + 1) + '\u202f/\u202f' + slides.length;
+    }, { passive: false });
+  });
+})();
+</script>
 </body>
 </html>
 FOOTEREOF
