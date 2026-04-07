@@ -112,6 +112,8 @@ _render() {
         fi
     done
 
+    n_pending=$(( n_pending + total - launched ))
+
     local pct=0
     [ "$total" -gt 0 ] && pct=$(( n_done * 100 / total ))
 
