@@ -1,0 +1,275 @@
+#!/bin/bash
+
+# grid-watch — live progress monitor for an in-progress grid run.
+#
+# Usage: grid-watch [grid-dir] [interval-seconds]
+#   grid-dir defaults to most recent run under RUN_DIR
+#   interval defaults to 15s
+#
+# Writes live.html into the grid dir and regenerates it every interval.
+# The HTML also auto-refreshes in the browser, so just open it once.
+
+set -e -o pipefail
+
+BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+[ -f "${BASE}/../local.conf" ] && source "${BASE}/../local.conf"
+
+_main() {
+    local grid_dir=${1}
+    local interval=${2:-15}
+
+    if [ -z "${grid_dir}" ]; then
+        local run_dir="${RUN_DIR:-${BASE}/../grid-run}"
+        grid_dir=$(ls -td "${run_dir}"/grid-* 2>/dev/null | head -1)
+        [ -z "${grid_dir}" ] && { echo "Usage: $0 <grid-dir> [interval]" >&2; exit 1; }
+    fi
+
+    grid_dir=$(realpath "${grid_dir}")
+    local out="${grid_dir}/live.html"
+
+    echo "Watching: ${grid_dir}" >&2
+    echo "Output:   ${out}" >&2
+    echo "Interval: ${interval}s  (Ctrl-C to stop)" >&2
+    echo "" >&2
+
+    while true; do
+        _render "${grid_dir}" "${interval}" > "${out}"
+        # count for the status line
+        local total done_count
+        total=$(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | wc -l)
+        done_count=$(grep -rl "Training complete:" "${grid_dir}"/*/train.log 2>/dev/null | wc -l)
+        printf "\r[%s] %d/%d complete — %s" "$(date +%H:%M:%S)" "${done_count}" "${total}" "${out}" >&2
+        sleep "${interval}"
+    done
+}
+
+# --------------------------------------------------------------------------- #
+
+_render() {
+    local grid_dir=$1
+    local interval=$2
+    local ts
+    ts=$(basename "${grid_dir}")
+
+    # collect trial dirs and their status
+    local trial_dirs=()
+    while IFS= read -r d; do
+        trial_dirs+=("$d")
+    done < <(find "${grid_dir}" -maxdepth 1 -mindepth 1 -type d | sort)
+
+    local total=${#trial_dirs[@]}
+    local n_done=0 n_running=0 n_pending=0 n_failed=0
+
+    # per-trial data arrays (bash 3 compat: use parallel arrays keyed by index)
+    local -a t_name t_status t_loss t_psnr t_img t_progress
+
+    for i in "${!trial_dirs[@]}"; do
+        local d="${trial_dirs[$i]}"
+        local name
+        name=$(basename "$d")
+        t_name[$i]=$name
+
+        local log="${d}/train.log"
+        local latest_img
+        latest_img=$(ls -t "${d}/images/output-"*.png "${d}/images/output.png" 2>/dev/null | head -1 || true)
+        t_img[$i]="${latest_img:+$(basename "$(dirname "$latest_img")" )/$(basename "$latest_img")}"
+        # make relative to grid_dir
+        [ -n "${latest_img}" ] && t_img[$i]="${name}/images/$(basename "$latest_img")"
+
+        if [ ! -f "$log" ]; then
+            t_status[$i]="pending"
+            t_loss[$i]=""; t_psnr[$i]=""; t_progress[$i]=""
+            n_pending=$(( n_pending + 1 ))
+        elif grep -q "Training complete:" "$log" 2>/dev/null; then
+            local loss psnr
+            loss=$(grep "Training complete:" "$log" | tail -1 | grep -oP '[\d.]+$' || echo "?")
+            psnr=$(grep "Eval PSNR:" "$log" 2>/dev/null | tail -1 | grep -oP '[\d.]+(?=dB)' || true)
+            # check for post-training errors
+            if grep -q "Traceback\|Error:" "$log" 2>/dev/null && \
+               [ "$(tail -5 "$log" | grep -c "Traceback\|Error:")" -gt 0 ]; then
+                t_status[$i]="failed"
+                n_failed=$(( n_failed + 1 ))
+            else
+                t_status[$i]="done"
+                n_done=$(( n_done + 1 ))
+            fi
+            t_loss[$i]=$loss
+            t_psnr[$i]=${psnr:-}
+            t_progress[$i]=""
+        elif grep -q "Traceback\|Error:" "$log" 2>/dev/null; then
+            t_status[$i]="failed"
+            t_loss[$i]=""; t_psnr[$i]=""
+            t_progress[$i]=$(tail -1 "$log" 2>/dev/null | cut -c1-60)
+            n_failed=$(( n_failed + 1 ))
+        else
+            t_status[$i]="running"
+            # last epoch line
+            local prog
+            prog=$(grep -oP 'Epoch \d+\[\d+%\].*Loss: [\d.]+' "$log" 2>/dev/null | tail -1 || true)
+            t_progress[$i]="${prog:-starting…}"
+            t_loss[$i]=$(grep "Training complete:\|Loss:" "$log" 2>/dev/null \
+                | tail -1 | grep -oP '[\d.]+$' || true)
+            t_psnr[$i]=""
+            n_running=$(( n_running + 1 ))
+        fi
+    done
+
+    local pct=0
+    [ "$total" -gt 0 ] && pct=$(( n_done * 100 / total ))
+
+    cat << HTMLEOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="${interval}">
+<title>grid-watch ${ts}</title>
+<style>
+:root {
+  --bg: #0e0e0e; --bg2: #181818; --bg3: #222;
+  --border: #2a2a2a; --text: #ddd; --muted: #555;
+  --done: #4a4; --running: #a84; --pending: #446; --failed: #a44;
+  --accent: #5af;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: ui-monospace, "Fira Mono", monospace; background: var(--bg);
+       color: var(--text); font-size: 12px; padding: 1rem; }
+h1   { color: var(--accent); font-size: 1rem; margin-bottom: .4rem; }
+.meta { color: var(--muted); margin-bottom: .6rem; font-size: .78rem; }
+.meta b { color: #999; }
+
+.progress-wrap { margin-bottom: 1rem; }
+.progress-bar  { height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--done); transition: width .3s; }
+.counts { display: flex; gap: 1rem; margin-top: .3rem; font-size: .75rem; }
+.counts .done    { color: var(--done); }
+.counts .running { color: var(--running); }
+.counts .pending { color: var(--pending); }
+.counts .failed  { color: var(--failed); }
+
+.grid { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  width: 180px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.card.done    { border-color: #2a4a2a; }
+.card.running { border-color: #4a3a1a; animation: pulse 2s ease-in-out infinite; }
+.card.failed  { opacity: .5; border-color: #4a1a1a; }
+.card.pending { opacity: .35; }
+
+@keyframes pulse {
+  0%, 100% { border-color: #4a3a1a; }
+  50%       { border-color: #8a6a2a; }
+}
+
+.thumb-wrap { position: relative; height: 140px; background: #111; flex-shrink: 0; }
+.thumb-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-wrap .no-img { display: flex; align-items: center; justify-content: center;
+                      height: 100%; color: var(--muted); font-size: .7rem; }
+
+.badge {
+  position: absolute; top: 4px; left: 4px;
+  font-size: .6rem; font-weight: 700; padding: 1px 5px;
+  border-radius: 3px; text-transform: uppercase; letter-spacing: .04em;
+}
+.badge.done    { background: var(--done);    color: #000; }
+.badge.running { background: var(--running); color: #000; }
+.badge.failed  { background: var(--failed);  color: #fff; }
+.badge.pending { background: var(--pending); color: #aaf; }
+
+.card-body { padding: .35rem .4rem; flex: 1; }
+.card-name { font-size: .65rem; color: #888; word-break: break-all;
+             margin-bottom: .25rem; line-height: 1.4; }
+.card-name .fn  { color: #e8a; } .card-name .cs { color: #ae8; }
+.card-name .mp  { color: #8ae; } .card-name .ly { color: #a8e; }
+.card-loss { font-size: .8rem; font-weight: 600; color: #bbb; }
+.card-psnr { font-size: .7rem; color: #6d6; margin-top: .1rem; }
+.card-prog { font-size: .6rem; color: var(--muted); margin-top: .2rem;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+<h1>grid-watch — ${ts}</h1>
+<div class="meta">
+  <b>$(date '+%H:%M:%S')</b> &nbsp;·&nbsp; refreshes every <b>${interval}s</b>
+</div>
+
+<div class="progress-wrap">
+  <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+  <div class="counts">
+    <span class="done">✓ ${n_done} done</span>
+    <span class="running">⟳ ${n_running} running</span>
+    <span class="pending">· ${n_pending} pending</span>
+    $([ "$n_failed" -gt 0 ] && echo "<span class=\"failed\">✗ ${n_failed} failed</span>")
+    <span style="color:var(--muted)">${total} total</span>
+  </div>
+</div>
+
+<div class="grid">
+HTMLEOF
+
+    # emit cards — running first, then done (sorted by loss), then pending, then failed
+    local order=()
+    # running
+    for i in "${!t_status[@]}"; do [ "${t_status[$i]}" = "running" ] && order+=($i); done
+    # done sorted by loss ascending
+    local done_indices=()
+    for i in "${!t_status[@]}"; do [ "${t_status[$i]}" = "done" ] && done_indices+=($i); done
+    while IFS= read -r i; do order+=("$i"); done < <(
+        for i in "${done_indices[@]}"; do printf '%s %s\n' "${t_loss[$i]:-9}" "$i"; done \
+        | sort -k1 -n | awk '{print $2}'
+    )
+    # pending
+    for i in "${!t_status[@]}"; do [ "${t_status[$i]}" = "pending" ] && order+=($i); done
+    # failed
+    for i in "${!t_status[@]}"; do [ "${t_status[$i]}" = "failed" ] && order+=($i); done
+
+    for i in "${order[@]}"; do
+        local name="${t_name[$i]}"
+        local status="${t_status[$i]}"
+        local loss="${t_loss[$i]}"
+        local psnr="${t_psnr[$i]}"
+        local img="${t_img[$i]}"
+        local prog="${t_progress[$i]}"
+
+        # parse name parts
+        local fn cs mp ly
+        fn=$(sed 's/^loss\([^-]*\).*/\1/' <<< "$name")
+        cs=$(sed 's/.*-cs\([^-]*\).*/\1/' <<< "$name")
+        mp=$(sed 's/.*-map\([^-]*\).*/\1/' <<< "$name")
+        ly=$(sed 's/.*-layers\([0-9]*\)$/\1/' <<< "$name")
+
+        echo "  <div class=\"card ${status}\">"
+        echo "    <div class=\"thumb-wrap\">"
+        if [ -n "$img" ]; then
+            echo "      <img src=\"${img}\" loading=\"lazy\">"
+        else
+            echo "      <div class=\"no-img\">no image yet</div>"
+        fi
+        echo "      <div class=\"badge ${status}\">${status}</div>"
+        echo "    </div>"
+        echo "    <div class=\"card-body\">"
+        echo "      <div class=\"card-name\"><span class=\"fn\">${fn}</span> <span class=\"cs\">${cs}</span> <span class=\"mp\">${mp}</span> <span class=\"ly\">${ly}L</span></div>"
+        [ -n "$loss" ] && echo "      <div class=\"card-loss\">${loss}</div>"
+        [ -n "$psnr" ] && echo "      <div class=\"card-psnr\">${psnr} dB</div>"
+        [ -n "$prog" ] && echo "      <div class=\"card-prog\">${prog}</div>"
+        echo "    </div>"
+        echo "  </div>"
+    done
+
+    cat << FOOTEREOF
+</div>
+</body>
+</html>
+FOOTEREOF
+}
+
+# --------------------------------------------------------------------------- #
+
+_main "$@"
