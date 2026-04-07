@@ -334,13 +334,16 @@ class Futuristica:
                 out = (out + 1.0) / 2.0
             raw = np.clip(out.cpu().numpy().reshape(size, size, -1), 0.0, 1.0)
 
-        # convert back to RGB [0,1]
+        # convert back to RGB [0,1], preserving extra channels (e.g. alpha from --four)
+        alpha = raw[..., 3:] if raw.shape[-1] > 3 else None
         if self.args.colorspace == "ycbcr":
             raw = np.clip(np.dot(raw[..., :3],
                 [[1, 0, 1.402], [1, -0.344136, -0.714136], [1, 1.772, 0]]), 0, 1)
         elif self.args.colorspace == "yuv":
-            raw = np.clip(np.dot(raw,
+            raw = np.clip(np.dot(raw[..., :3],
                 [[1, 0, 1.13983], [1, -0.39465, -0.58060], [1, 2.03211, 0]]), 0, 1)
+        if alpha is not None:
+            raw = np.concatenate([raw, alpha], axis=-1)
 
         if self.args.four:
             rgb = raw[..., :3]
