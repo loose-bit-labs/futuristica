@@ -5,8 +5,7 @@ go_train() {
     local base_dir="${TRAIN_DIR:-${PWD}/run}"
     local dir="${base_dir}/training-${now}"
     mkdir -p "${dir}/images" || return ${?}
-    rm -f last || return ${?}
-    ln -s "${dir}" last || return ${?}
+    ln -sfn "training-${now}" "${base_dir}/last"
 
     echo "output will be in ${dir}"
     cd "${dir}" || return ${?}

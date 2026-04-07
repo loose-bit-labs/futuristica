@@ -53,6 +53,7 @@ _main() {
     local grid_dir="${RUN_DIR}/grid-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "${RUN_DIR}"
     mkdir -p "${grid_dir}"
+    ln -sfn "$(basename "${grid_dir}")" "${RUN_DIR}/last"
 
     local results="${grid_dir}/results.txt"
     printf "%-40s %12s %s\n" "trial" "final_loss" "dir" | tee "${results}"
