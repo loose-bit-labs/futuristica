@@ -1,5 +1,6 @@
 import argparse
 import copy
+import json
 import glob
 import logging
 import os
@@ -209,7 +210,19 @@ class MetaTrainer:
         return np.concatenate(parts, axis=-1)
 
     def _save(self, model, path):
-        np.savez(path, **{k: v.detach().cpu().numpy() for k, v in model.named_parameters()})
+        a = self.args
+        config = {
+            "model_size":  a.model_size,
+            "model_count": a.model_count,
+            "coding":      a.coding,
+            "mapping":     a.mapping,
+            "colorspace":  a.colorspace,
+            "activation":  a.activation,
+            "four":        getattr(a, "four", False),
+            "loss_fn":     a.loss_fn,
+        }
+        weights = {k: v.detach().cpu().numpy() for k, v in model.named_parameters()}
+        np.savez(path, __config__=np.array(json.dumps(config)), **weights)
 
     def _load(self, model, path):
         w = np.load(path)

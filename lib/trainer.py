@@ -226,10 +226,19 @@ class Futuristica:
 
     def export_weights(self, model, filename="weights.npz"):
         Futuristica.LOG.info(f"Saving weights to {filename}")
-        weights = {}
-        for i, (name, param) in enumerate(model.named_parameters()):
-            weights[name] = param.detach().cpu().numpy()  # Convert to NumPy
-        np.savez(filename, **weights)
+        weights = {name: param.detach().cpu().numpy() for name, param in model.named_parameters()}
+        config = {
+            "model_size":  self.args.model_size,
+            "model_count": self.args.model_count,
+            "coding":      self.args.coding,
+            "mapping":     self.args.mapping,
+            "colorspace":  self.args.colorspace,
+            "activation":  self.args.activation,
+            "four":        self.args.four,
+            "loss_fn":     self.args.loss_fn,
+            "size":        self.args.size,
+        }
+        np.savez(filename, __config__=np.array(json.dumps(config)), **weights)
         Futuristica.LOG.info(f"Saved weights to {filename}")
 
 
@@ -239,6 +248,9 @@ class Futuristica:
             return model
         Futuristica.LOG.info(f"Loading weights from {filename}")
         weights = np.load(filename)
+        if '__config__' in weights:
+            config = json.loads(str(weights['__config__']))
+            Futuristica.check_compat(config, self.args, filename)
         noise_scale = 0.0 if self.args.no_load_noise else 0.01
         for name, param in model.named_parameters():
             ww = weights[name].copy()
@@ -247,6 +259,27 @@ class Futuristica:
             param.data = torch.from_numpy(ww).to(param.device)
         Futuristica.LOG.info(f"Loaded weights from {filename}")
         return model
+
+    @staticmethod
+    def check_compat(config, args, filename=""):
+        arch_keys = ["model_size", "model_count", "coding", "four"]
+        mismatches = []
+        for k in arch_keys:
+            stored = config.get(k)
+            current = getattr(args, k, None)
+            if stored is not None and current is not None and stored != current:
+                mismatches.append(f"  {k}: checkpoint has {stored!r}, got {current!r}")
+        if mismatches:
+            where = f" ({filename})" if filename else ""
+            raise ValueError(f"Checkpoint architecture mismatch{where}:\n" + "\n".join(mismatches))
+
+    @staticmethod
+    def read_config(filename):
+        """Return the __config__ dict from an npz, or None if not present."""
+        weights = np.load(filename)
+        if '__config__' in weights:
+            return json.loads(str(weights['__config__']))
+        return None
 
 
     def generate_image(self, model, filename = "generated_image.png", timestamp = False):
