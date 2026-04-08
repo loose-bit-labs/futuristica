@@ -20,6 +20,8 @@ class Translate:
         names, sizes, values = [], {}, {}
         current = None
         for key in data.files:
+            if key.startswith('__'):
+                continue
             entry = data[key]
             name = key.replace(".", "_").upper()
             sizes[name] = list(entry.shape)

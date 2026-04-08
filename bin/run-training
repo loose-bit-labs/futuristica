@@ -6,11 +6,14 @@ BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${BASE}/../lib/based.sh"
 
 _run_training_main() {
+	local disable_meta=""
+	[ "${1}" = "--disable-meta-checkpoint" ] && { disable_meta=1; shift; }
+
 	local file=${1:-${BASE}/../images/lenna.png}
 
 	source_conf "${BASE}/../local.conf" \
 		TRAIN_DIR CHECKPOINTS_DIR TRAINING SIZE COLORSPACE \
-		LOSS_FN MAPPING MODEL_SIZE MODEL_COUNT CODING EXTRAS CHECKPOINT
+		LOSS_FN MAPPING MODEL_SIZE MODEL_COUNT CODING EXTRAS CHECKPOINT PROGRESSIVE
 
 	TRAINING="${TRAINING:-20}"
 	SIZE="${SIZE:-512}"
@@ -22,6 +25,7 @@ _run_training_main() {
 	CODING="${CODING:-3}"
 	EXTRAS="${EXTRAS:-}"
 	CHECKPOINT="${CHECKPOINT:-}"
+	PROGRESSIVE="${PROGRESSIVE:-}"
 	TRAIN_DIR="${TRAIN_DIR:-${BASE}/../run}"
 	CHECKPOINTS_DIR="${CHECKPOINTS_DIR:-}"
 
@@ -29,8 +33,6 @@ _run_training_main() {
 	[ -f "${file}" ] || { echo "image not found: ${file}"; return 1; }
 
 	local no_load_noise=""
-	local disable_meta=""
-	[ "${1}" = "--disable-meta-checkpoint" ] && { disable_meta=1; shift; }
 
 	if [ -n "${CHECKPOINT}" ]; then
 		CHECKPOINT=$(fullpath ${CHECKPOINT})
@@ -61,6 +63,7 @@ _run_training_main() {
 		${no_load_noise}                \
 		--model_size  ${MODEL_SIZE}     \
 		--model_count ${MODEL_COUNT}    \
+		${PROGRESSIVE:+--progressive}   \
 		${EXTRAS}                       \
 		2>&1 | tee train.log || return ${?}
 	echo "Training completed"

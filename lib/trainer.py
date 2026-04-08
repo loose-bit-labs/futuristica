@@ -49,6 +49,7 @@ class Futuristica:
         self.parser.add_argument("--steps",                 type=int, default=0)
         self.parser.add_argument("-b", "--batch",           type=int, default=32768)
         self.parser.add_argument("--plateau",               type=int, default=0)
+        self.parser.add_argument("--progressive",           action="store_true", help="coarse-to-fine: train at size/4, size/2, then full size")
 
 
     def main(self):
@@ -111,8 +112,28 @@ class Futuristica:
                 torch.tensor(colors, dtype=torch.float32, device=self.device))
 
 
+    def load_image_at_size(self, image_path, size):
+        """Load image at an explicit size, ignoring self.args.size."""
+        orig = self.args.size
+        self.args.size = size
+        result = self.load_image(image_path)
+        self.args.size = orig
+        return result
+
     def train(self, coords, colors):
-        return self.train_back(coords, colors)
+        if not self.args.progressive:
+            return self.train_back(coords, colors)
+
+        full_size = self.args.size
+        total_epochs = 5000 * self.args.training
+        # stages: (fraction_of_total, resolution)
+        stages = [
+            (0.20, max(16, full_size // 4)),
+            (0.30, max(32, full_size // 2)),
+            (0.50, full_size),
+        ]
+        Futuristica.LOG.info(f"Progressive training: {[s[1] for s in stages]} -> {total_epochs} total epochs")
+        return self.train_progressive(stages, total_epochs)
 
 
     def create_model(self, first=True):
@@ -148,6 +169,76 @@ class Futuristica:
             key = "mse"
         return loss_fns[key]
 
+
+    def train_progressive(self, stages, total_epochs):
+        """Train with coarse-to-fine resolution stages, single continuous optimizer."""
+        model = self.create_model()
+        if self.args.checkpoint and '""' != self.args.checkpoint:
+            model = self.load_weights(model, self.args.checkpoint)
+
+        loss_fn   = self.get_loss_function(self.args.loss_fn)()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs, eta_min=1e-6)
+
+        best_model  = None
+        best_loss   = float('inf')
+        imaged_last = 0
+        imaged_too_soon = 50000
+        use_sine    = self.args.activation == "sine"
+        plateau     = self.args.plateau
+        no_improve  = 0
+
+        epoch = 0
+        for frac, size in stages:
+            stage_epochs = int(total_epochs * frac)
+            coords, colors = self.load_image_at_size(self.args.image, size)
+            n_pixels = coords.shape[0]
+            batch    = min(self.args.batch, n_pixels)
+            Futuristica.LOG.info(f"Progressive stage: size={size}, epochs={stage_epochs}")
+
+            for _ in range(stage_epochs):
+                idx = torch.randperm(n_pixels, device=self.device)[:batch]
+                optimizer.zero_grad()
+                predictions = model(coords[idx])
+                if use_sine:
+                    predictions = (predictions + 1.0) / 2.0
+                loss = loss_fn(predictions, colors[idx])
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+
+                loss_v = loss.item()
+                self.loss_history.append(loss_v)
+
+                if loss_v < best_loss:
+                    best_loss  = loss_v
+                    no_improve = 0
+                    best_model = self.create_model(first=False)
+                    best_model.load_state_dict(model.state_dict())
+                    best_model.cpu()
+                    self.loss_bests.append(best_loss)
+                    if imaged_last == 0 or epoch - imaged_last > imaged_too_soon:
+                        self.generate_image(model, self.args.generated, True)
+                        self.export_weights(model, self.args.weights)
+                        imaged_last = epoch
+                        self.update_plot(epoch)
+                else:
+                    no_improve += 1
+                    if plateau and no_improve >= plateau:
+                        Futuristica.LOG.info(f"Epoch {epoch}: plateau, stopping")
+                        best_model.to(self.device)
+                        return best_model
+
+                if epoch % 1000 == 0:
+                    lr = scheduler.get_last_lr()[0]
+                    self.update_plot(epoch)
+                    Futuristica.LOG.info(f"Epoch {epoch}[{int(epoch*100/total_epochs)}%]: Loss: {loss_v:.6f} vs ({best_loss:.6f}), LR:{lr:.6e}")
+
+                epoch += 1
+
+        Futuristica.LOG.info(f"Training complete: {best_loss:.6f}")
+        best_model.to(self.device)
+        return best_model
 
     def train_back(self, coords, colors):
         model = self.create_model()
