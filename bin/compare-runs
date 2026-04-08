@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""compare-runs — extract loss curves from train.log files and write a CSV + HTML chart.
+
+Usage:
+    bin/compare-runs run1/train.log run2/train.log [...]
+    bin/compare-runs run1/train.log run2/train.log --output comparison
+    bin/compare-runs --labels "meta,baseline" run1/train.log run2/train.log
+
+Output:
+    <output>.csv   — epoch + one loss column per run
+    <output>.html  — interactive Chart.js line chart
+"""
+
+import argparse
+import csv
+import os
+import re
+import sys
+
+
+LOG = re.compile(r'Epoch (\d+)\[.*?\].*?Loss: ([\d.]+)')
+FINAL = re.compile(r'Training complete: ([\d.]+)')
+
+
+def parse_log(path):
+    """Return list of (epoch, loss) tuples from a train.log."""
+    points = []
+    final = None
+    with open(path) as f:
+        for line in f:
+            m = LOG.search(line)
+            if m:
+                points.append((int(m.group(1)), float(m.group(2))))
+                continue
+            m = FINAL.search(line)
+            if m:
+                final = float(m.group(1))
+    return points, final
+
+
+def label_for(path, labels, idx):
+    if labels and idx < len(labels):
+        return labels[idx]
+    # use grandparent dir name if path is .../training-TIMESTAMP/train.log
+    parts = os.path.normpath(path).split(os.sep)
+    for part in reversed(parts):
+        if part not in ('train.log', 'logs', ''):
+            return part
+    return f'run{idx+1}'
+
+
+def write_csv(path, epochs, runs):
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['epoch'] + [r['label'] for r in runs])
+        for epoch in epochs:
+            row = [epoch]
+            for r in runs:
+                row.append(r['by_epoch'].get(epoch, ''))
+            w.writerow(row)
+    print(f'csv:  {path}')
+
+
+def write_html(path, epochs, runs):
+    colors = ['#5af', '#fa5', '#5fa', '#f5a', '#a5f', '#af5', '#f55', '#5f5']
+
+    datasets = []
+    for i, r in enumerate(runs):
+        color = colors[i % len(colors)]
+        pts = [{'x': e, 'y': r['by_epoch'][e]} for e in epochs if e in r['by_epoch']]
+        final_str = f' → {r["final"]:.6f}' if r['final'] is not None else ''
+        datasets.append(f"""{{
+            label: {repr(r['label'] + final_str)},
+            data: {pts},
+            borderColor: {repr(color)},
+            backgroundColor: {repr(color + '22')},
+            borderWidth: 1.5,
+            pointRadius: 0,
+            tension: 0.1,
+        }}""")
+
+    datasets_js = ',\n'.join(datasets)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>compare-runs</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ background: #0e0e0e; color: #ddd;
+       font-family: ui-monospace, "Fira Mono", monospace;
+       font-size: 13px; padding: 1.5rem; }}
+h1   {{ color: #5af; font-size: 1.1rem; margin-bottom: 1rem; }}
+.wrap {{ max-width: 1000px; }}
+canvas {{ width: 100% !important; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Loss curves — {len(runs)} runs</h1>
+<canvas id="chart"></canvas>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+new Chart(document.getElementById('chart'), {{
+    type: 'line',
+    data: {{ datasets: [{datasets_js}] }},
+    options: {{
+        parsing: false,
+        animation: false,
+        scales: {{
+            x: {{ type: 'linear', title: {{ display: true, text: 'epoch', color: '#888' }},
+                  ticks: {{ color: '#666' }}, grid: {{ color: '#222' }} }},
+            y: {{ title: {{ display: true, text: 'loss', color: '#888' }},
+                  ticks: {{ color: '#666' }}, grid: {{ color: '#222' }} }},
+        }},
+        plugins: {{
+            legend: {{ labels: {{ color: '#ccc', font: {{ family: 'monospace' }} }} }},
+            tooltip: {{ mode: 'index', intersect: false }},
+        }},
+    }},
+}});
+</script>
+</body>
+</html>"""
+
+    with open(path, 'w') as f:
+        f.write(html)
+    print(f'html: {path}')
+
+
+def main():
+    p = argparse.ArgumentParser(description='Compare training run loss curves')
+    p.add_argument('logs', nargs='+', help='train.log files to compare')
+    p.add_argument('--output', '-o', default='comparison', help='output base name (default: comparison)')
+    p.add_argument('--labels', '-l', help='comma-separated run labels (default: derived from path)')
+    args = p.parse_args()
+
+    label_list = [l.strip() for l in args.labels.split(',')] if args.labels else []
+
+    runs = []
+    all_epochs = set()
+    for i, path in enumerate(args.logs):
+        points, final = parse_log(path)
+        if not points:
+            print(f'warning: no loss data found in {path}', file=sys.stderr)
+        by_epoch = {epoch: loss for epoch, loss in points}
+        all_epochs.update(by_epoch)
+        runs.append({
+            'label': label_for(path, label_list, i),
+            'by_epoch': by_epoch,
+            'final': final,
+        })
+
+    epochs = sorted(all_epochs)
+
+    write_csv(f'{args.output}.csv', epochs, runs)
+    write_html(f'{args.output}.html', epochs, runs)
+
+
+if __name__ == '__main__':
+    main()
