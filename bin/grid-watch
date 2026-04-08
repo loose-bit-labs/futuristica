@@ -12,7 +12,8 @@
 set -e -o pipefail
 
 BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-[ -f "${BASE}/../local.conf" ] && source "${BASE}/../local.conf"
+source "${BASE}/../lib/based.sh"
+source_conf "${BASE}/../local.conf" RUN_DIR
 
 _main() {
     local grid_dir=${1}

@@ -3,7 +3,7 @@
 set -e -o pipefail
 
 BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export PYENV_VERSION=$(cat "${BASE}/../.python-version" 2>/dev/null || echo "")
+source "${BASE}/../lib/based.sh"
 
 ################################################################################
 # run-meta-train-grid — generate Reptile meta-init checkpoints for a grid of
@@ -15,7 +15,7 @@ export PYENV_VERSION=$(cat "${BASE}/../.python-version" 2>/dev/null || echo "")
 #
 #   e.g.  s16_c6_q3_huber_ycbcr_polar.npz
 #
-# These checkpoints are drop-in warm-starts for --ckp in futuristica training.
+# These checkpoints are drop-in warm-starts for --checkpoint in futuristica training.
 # The architecture flags (size, count, coding) MUST match between checkpoint
 # and training run — the others (loss, colorspace, encoding) affect quality of
 # the init but not loadability.
@@ -54,20 +54,26 @@ export PYENV_VERSION=$(cat "${BASE}/../.python-version" 2>/dev/null || echo "")
 # activation: relu tanh — sine (SIREN) is the only one meta-trained so far
 ################################################################################
 
-# defaults — override in local.conf
-CONCURRENCY=2
-OUTER_STEPS=2002
-MODEL_SIZE=16
-CODING=3
-LOSS_FNS="huber mse"
-COLORSPACES="ycbcr"
-MAPPINGS="polar fourier"
-MODEL_COUNTS="4 6 8"
-CHECKPOINTS_DIR=""   # set in local.conf or falls back to sibling of RUN_DIR
-RUN_DIR=""           # used only to infer CHECKPOINTS_DIR default
-IMAGE_LIST=""        # required — set in local.conf or pass via env
+# source local.conf first so env-provided overrides (VAR=val ./script) take
+# precedence — source_conf must be called before any default assignments
+source_conf "${BASE}/../local.conf" \
+    CONCURRENCY OUTER_STEPS SAVE_EVERY MODEL_SIZE CODING \
+    LOSS_FNS COLORSPACES MAPPINGS MODEL_COUNTS \
+    CHECKPOINTS_DIR RUN_DIR IMAGE_LIST
 
-[ -f "${BASE}/../local.conf" ] && source "${BASE}/../local.conf"
+# defaults — applied only if not set by local.conf or env
+CONCURRENCY="${CONCURRENCY:-2}"
+OUTER_STEPS="${OUTER_STEPS:-2002}"
+SAVE_EVERY="${SAVE_EVERY:-500}"
+MODEL_SIZE="${MODEL_SIZE:-16}"
+CODING="${CODING:-3}"
+LOSS_FNS="${LOSS_FNS:-huber mse}"
+COLORSPACES="${COLORSPACES:-ycbcr}"
+MAPPINGS="${MAPPINGS:-polar fourier}"
+MODEL_COUNTS="${MODEL_COUNTS:-4 6 8}"
+CHECKPOINTS_DIR="${CHECKPOINTS_DIR:-}"
+RUN_DIR="${RUN_DIR:-}"
+IMAGE_LIST="${IMAGE_LIST:-}"
 
 # infer CHECKPOINTS_DIR from RUN_DIR if not set
 if [ -z "${CHECKPOINTS_DIR}" ]; then
@@ -170,18 +176,19 @@ _run_one() {
     local force=$6
 
     local ckp_arg=""
-    [ -f "${out}" ] && [ "${force}" -eq 0 ] && ckp_arg="--ckp ${out}"
+    [ -f "${out}" ] && [ "${force}" -eq 0 ] && ckp_arg="--checkpoint ${out}"
 
-    "${META_TRAIN}"                    \
-        --image_list  "${IMAGE_LIST}"  \
-        --outer_steps "${OUTER_STEPS}" \
-        -o            "${out}"         \
-        -s            "${MODEL_SIZE}"  \
-        -c            "${count}"       \
-        -q            "${CODING}"      \
-        -l            "${loss}"        \
-        -k            "${cs}"          \
-        -e            "${enc}"         \
+    "${META_TRAIN}"                        \
+        --image_list  "${IMAGE_LIST}"      \
+        --outer_steps "${OUTER_STEPS}"     \
+        --save_every  "${SAVE_EVERY}"      \
+        --output      "${out}"             \
+        --model_size  "${MODEL_SIZE}"      \
+        --model_count "${count}"           \
+        --coding      "${CODING}"          \
+        --loss_fn     "${loss}"            \
+        --colorspace  "${cs}"              \
+        --mapping     "${enc}"             \
         ${ckp_arg}
 }
 

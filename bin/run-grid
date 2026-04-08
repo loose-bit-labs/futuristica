@@ -3,9 +3,7 @@
 set -e -o pipefail
 
 BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-
-# inherit the repo's pyenv environment so trial subdirs (outside the repo) get the right python
-export PYENV_VERSION=$(cat "${BASE}/../.python-version" 2>/dev/null || echo "")
+source "${BASE}/../lib/based.sh"
 
 ################################################################################
 # run-grid — sweep training parameters and collect results
@@ -20,20 +18,21 @@ export PYENV_VERSION=$(cat "${BASE}/../.python-version" 2>/dev/null || echo "")
 #   RUN_DIR=/home/you/data/futuristica/grid-runs
 ################################################################################
 
-# defaults — override any of these in local.conf
-CONCURRENCY=2
-TRAINING=20
-SIZE=512
-MODEL_SIZE=16
-CODING=3
-LOSS_FNS="l1 mse huber"
-COLORSPACES="rgb ycbcr"
-MAPPINGS="polar fourier"
-MODEL_COUNTS="4 6 8"
-EXTRAS=""
-RUN_DIR="${BASE}/../grid-run"
+source_conf "${BASE}/../local.conf" \
+    CONCURRENCY TRAINING SIZE MODEL_SIZE CODING \
+    LOSS_FNS COLORSPACES MAPPINGS MODEL_COUNTS EXTRAS RUN_DIR
 
-[ -f "${BASE}/../local.conf" ] && source "${BASE}/../local.conf"
+CONCURRENCY="${CONCURRENCY:-2}"
+TRAINING="${TRAINING:-20}"
+SIZE="${SIZE:-512}"
+MODEL_SIZE="${MODEL_SIZE:-16}"
+CODING="${CODING:-3}"
+LOSS_FNS="${LOSS_FNS:-l1 mse huber}"
+COLORSPACES="${COLORSPACES:-rgb ycbcr}"
+MAPPINGS="${MAPPINGS:-polar fourier}"
+MODEL_COUNTS="${MODEL_COUNTS:-4 6 8}"
+EXTRAS="${EXTRAS:-}"
+RUN_DIR="${RUN_DIR:-${BASE}/../grid-run}"
 
 ################################################################################
 
@@ -135,6 +134,12 @@ _run_trial() {
     local mapping=$5
     local model_count=$6
 
+    local ckp_arg=""
+    if [ -n "${CHECKPOINTS_DIR}" ]; then
+        local auto_ckp="${CHECKPOINTS_DIR}/s${MODEL_SIZE}_c${model_count}_q${CODING}_${loss_fn}_${colorspace}_${mapping}.npz"
+        [ -f "${auto_ckp}" ] && ckp_arg="--checkpoint ${auto_ckp}"
+    fi
+
     cd "${dir}"
 
     "${FUTURISTICA}"            \
@@ -150,6 +155,7 @@ _run_trial() {
         --model_size "${MODEL_SIZE}"  \
         --model_count "${model_count}" \
         --no_gui                      \
+        ${ckp_arg}                    \
         ${EXTRAS}
 
     # translate weights to GLSL

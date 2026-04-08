@@ -21,7 +21,7 @@ class MetaTrainer:
 
     Trains a starting point theta* such that for any image, K steps of
     gradient descent from theta* reaches a better solution than Sitzmann
-    random init.  The result is a weights.npz drop-in for --ckp.
+    random init.  The result is a weights.npz drop-in for --checkpoint.
 
     Algorithm (Reptile, Nichol et al. 2018):
         theta = sitzmann_init()
@@ -46,7 +46,7 @@ class MetaTrainer:
         p.add_argument("--batch",                 type=int,   default=8118)
         p.add_argument("--size",                  type=int,   default=255,  help="resize images to NxN for meta-training")
         p.add_argument("--save_every",            type=int,   default=212)
-        p.add_argument("--ckp",                   type=str,   help="resume from checkpoint")
+        p.add_argument("--checkpoint",             type=str,   help="resume from checkpoint")
         # architecture — must match the runs you intend to warm-start
         p.add_argument("-s", "--model_size",      type=int,   default=16)
         p.add_argument("-c", "--model_count",     type=int,   default=4)
@@ -72,9 +72,9 @@ class MetaTrainer:
             raise RuntimeError("provide images_dir or --image_list")
 
         model = self._make_model()
-        if self.args.ckp:
-            self._load(model, self.args.ckp)
-            self.LOG.info(f"resuming from {self.args.ckp}")
+        if self.args.checkpoint:
+            self._load(model, self.args.checkpoint)
+            self.LOG.info(f"resuming from {self.args.checkpoint}")
 
         self._reptile(model, images)
 

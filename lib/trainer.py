@@ -36,7 +36,8 @@ class Futuristica:
         self.parser.add_argument("-g", "--generated",       type=str, default="generated_image.png")
         self.parser.add_argument("-t", "--training",        type=int, default=20)
         self.parser.add_argument("-q", "--coding",          type=int, default=3)
-        self.parser.add_argument("-w", "--ckp",             type=str)
+        self.parser.add_argument("-w", "--checkpoint",        type=str)
+        self.parser.add_argument("--no_load_noise",           action="store_true", help="load checkpoint weights exactly, without perturbation")
         self.parser.add_argument("-s", "--model_size",      type=int, default=16)
         self.parser.add_argument("-c", "--model_count",     type=int, default=4)
         self.parser.add_argument("-l", "--loss_fn",         choices=losers, default="l1")
@@ -151,8 +152,8 @@ class Futuristica:
     def train_back(self, coords, colors):
         model = self.create_model()
 
-        if self.args.ckp and '""' != self.args.ckp:
-            model = self.load_weights(model, self.args.ckp)
+        if self.args.checkpoint and '""' != self.args.checkpoint:
+            model = self.load_weights(model, self.args.checkpoint)
 
         best_model      = None
         best_loss       = float('inf')
@@ -238,10 +239,11 @@ class Futuristica:
             return model
         Futuristica.LOG.info(f"Loading weights from {filename}")
         weights = np.load(filename)
-        noise_scale = .01
+        noise_scale = 0.0 if self.args.no_load_noise else 0.01
         for name, param in model.named_parameters():
-            ww = weights[name]
-            ww += np.random.uniform(low=-noise_scale, high=noise_scale, size=ww.shape)
+            ww = weights[name].copy()
+            if noise_scale:
+                ww += np.random.uniform(low=-noise_scale, high=noise_scale, size=ww.shape)
             param.data = torch.from_numpy(ww).to(param.device)
         Futuristica.LOG.info(f"Loaded weights from {filename}")
         return model
