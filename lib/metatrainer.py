@@ -55,6 +55,7 @@ class MetaTrainer:
         p.add_argument("-k", "--colorspace",      choices=["rgb", "ycbcr", "yuv"],        default="ycbcr")
         p.add_argument("-a", "--activation",      choices=["sine", "relu", "tanh"],        default="sine")
         p.add_argument("-f", "--four",            action="store_true")
+        p.add_argument("-l", "--loss_fn",         choices=["mse", "huber", "l1"], default="mse")
         self.args = p.parse_args()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -102,7 +103,12 @@ class MetaTrainer:
                 pred  = fast(coords[idx])
                 if args.activation == "sine":
                     pred = (pred + 1.0) / 2.0
-                loss  = F.mse_loss(pred, colors[idx])
+                if args.loss_fn == "huber":
+                    loss = F.huber_loss(pred, colors[idx])
+                elif args.loss_fn == "l1":
+                    loss = F.l1_loss(pred, colors[idx])
+                else:
+                    loss = F.mse_loss(pred, colors[idx])
                 opt.zero_grad()
                 loss.backward()
                 opt.step()

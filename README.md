@@ -37,14 +37,16 @@ images/           sample training images
 
 ## Binaries
 
-| Command               | What it does                                      |
-|-----------------------|---------------------------------------------------|
-| `bin/futuristica`     | Train the model                                   |
-| `bin/translate`       | Export weights → GLSL for ShaderToy               |
-| `bin/run-training`    | Organised training run (timestamped output dir)   |
-| `bin/run-grid`        | Parameter sweep across loss/colorspace/mapping    |
-| `bin/trainspotting`   | GUI image viewer for watching training (needs X11)|
-| `bin/historic-output` | Build and play a timelapse mp4 of a run           |
+| Command                    | What it does                                      |
+|----------------------------|---------------------------------------------------|
+| `bin/futuristica`          | Train the model                                   |
+| `bin/translate`            | Export weights → GLSL for ShaderToy               |
+| `bin/run-training`         | Organised training run (timestamped output dir)   |
+| `bin/run-grid`             | Parameter sweep across loss/colorspace/mapping    |
+| `bin/meta-train`           | Reptile meta-learner — build a warm-start init    |
+| `bin/run-meta-train-grid`  | Generate checkpoint grid for common config combos |
+| `bin/trainspotting`        | GUI image viewer for watching training (needs X11)|
+| `bin/historic-output`      | Build and play a timelapse mp4 of a run           |
 
 ## Direct usage
 
@@ -68,4 +70,4 @@ directories and per-session training knobs without touching the scripts:
 cp etc/local.conf.example local.conf
 ```
 
-See `dox/notes.md` for experiments, architecture notes, and SSH/headless tips.
+See `dox/notes.md` for experiments, architecture notes, meta-training results, and SSH/headless tips.
