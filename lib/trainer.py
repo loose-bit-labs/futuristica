@@ -65,12 +65,21 @@ class Futuristica:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         Futuristica.LOG.info(f"Using device: {self.device}")
 
+        import time
+        t0 = time.time()
+
         coords, colors = self.load_image(self.args.image)
         model = self.train(coords, colors)
 
         self.export_weights(model, self.args.weights)
         self.generate_image(model, self.args.generated)
         self.eval_psnr(model)
+
+        elapsed = int(time.time() - t0)
+        h, rem = divmod(elapsed, 3600)
+        m, s   = divmod(rem, 60)
+        human  = (f"{h}h " if h else "") + (f"{m}m " if m or h else "") + f"{s}s"
+        Futuristica.LOG.info(f"Runtime: {human} ({elapsed}s)")
 
 
     def load_image(self, image_path):
@@ -194,6 +203,10 @@ class Futuristica:
             coords, colors = self.load_image_at_size(self.args.image, size)
             n_pixels = coords.shape[0]
             batch    = min(self.args.batch, n_pixels)
+            best_loss   = float('inf')
+            best_model  = None
+            imaged_last = 0
+            no_improve  = 0
             Futuristica.LOG.info(f"Progressive stage: size={size}, epochs={stage_epochs}")
 
             for _ in range(stage_epochs):
