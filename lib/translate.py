@@ -1,4 +1,5 @@
 import argparse
+import json
 import numpy as np
 
 
@@ -6,17 +7,29 @@ class Translate:
     def main(self):
         parser = argparse.ArgumentParser(description="Translate weights to GLSL")
         parser.add_argument('filename')
+        parser.add_argument("-s", "--silent",     action="store_true")
         parser.add_argument("-c", "--coding",     type=int, default=3)
         parser.add_argument("-e", "--mapping",    choices=["polar", "fourier", "legacy"], default="polar")
         parser.add_argument("-k", "--colorspace", choices=["rgb", "ycbcr", "yuv"], default="ycbcr")
         parser.add_argument("-a", "--activation", choices=["sine", "relu"], default="sine")
         args = parser.parse_args()
 
-        names, sizes, values = self._load(args.filename)
+        # auto-detect settings from embedded __config__ if present
+        data = np.load(args.filename)
+        if '__config__' in data:
+            cfg = json.loads(str(data['__config__']))
+            if not args.coding     and 'coding'     in cfg: args.coding     = cfg['coding']
+            if not args.mapping    and 'mapping'    in cfg: args.mapping    = cfg['mapping']
+            if not args.colorspace and 'colorspace' in cfg: args.colorspace = cfg['colorspace']
+            if not args.activation and 'activation' in cfg: args.activation = cfg['activation']
+            args.model_size = cfg.get('model_size', 16)
+        else:
+            args.model_size = 16
+
+        names, sizes, values = self._load(data)
         print(self._generate(args, names, sizes, values))
 
-    def _load(self, filename):
-        data = np.load(filename)
+    def _load(self, data):
         names, sizes, values = [], {}, {}
         current = None
         for key in data.files:
@@ -66,6 +79,10 @@ class Translate:
         setup_block = f"\n{setup}" if setup else ""
         return f"const float PI = 3.14159265358979;\nmat4 encode(in vec2 p) {{{setup_block}\n\treturn mat4(\n{rows}\n\t);\n}}"
 
+    # -------------------------------------------------------------------------
+    # model_size = 16 — one mat4 per layer
+    # -------------------------------------------------------------------------
+
     def _hidden_layer(self, out, a, w_vals, b_vals, fn):
         entries = []
         for i in range(16):
@@ -98,6 +115,94 @@ class Translate:
                 return f"sigmoid({expr})"
 
         ch = [channel(i) for i in range(4)]
+        return self._color_return(ch, colorspace)
+
+    # -------------------------------------------------------------------------
+    # model_size = 32 — two mat4s per layer (a0/a1, b0/b1)
+    # -------------------------------------------------------------------------
+
+    def _hidden_layer_32_first(self, out0, out1, a0, w_vals, b_vals, fn):
+        """First hidden layer: input is one mat4 (16 inputs), output is two mat4s (32 outputs)."""
+        entries = []
+        for i in range(32):
+            bias = b_vals[i] if i < len(b_vals) else 0.0
+            # weight row i: 16 values (input is 16-wide)
+            ws = ", ".join(
+                self._f(w_vals[i*16 + j*4 + k] if i*16 + j*4 + k < len(w_vals) else 0.0, 4)
+                for j in range(4) for k in range(4)
+            )
+            entries.append(f"{fn}({self._f(bias)} + layeriate({a0}, mat4({ws})))")
+        joined0 = "\n\t\t, ".join(entries[:16])
+        joined1 = "\n\t\t, ".join(entries[16:])
+        return (
+            f"\t{out0} = mat4(\n\t\t  {joined0}\n\t);\n"
+            f"\t{out1} = mat4(\n\t\t  {joined1}\n\t);"
+        )
+
+    def _hidden_layer_32(self, out0, out1, a0, a1, w_vals, b_vals, fn):
+        """Hidden layer: input is two mat4s (32 inputs), output is two mat4s (32 outputs)."""
+        entries = []
+        for i in range(32):
+            bias = b_vals[i] if i < len(b_vals) else 0.0
+            # weight row i: 32 values split into left (first 16) and right (last 16)
+            ws_l = ", ".join(
+                self._f(w_vals[i*32 + j*4 + k] if i*32 + j*4 + k < len(w_vals) else 0.0, 4)
+                for j in range(4) for k in range(4)
+            )
+            ws_r = ", ".join(
+                self._f(w_vals[i*32 + 16 + j*4 + k] if i*32 + 16 + j*4 + k < len(w_vals) else 0.0, 4)
+                for j in range(4) for k in range(4)
+            )
+            entries.append(
+                f"{fn}({self._f(bias)} + layeriate({a0}, mat4({ws_l})) + layeriate({a1}, mat4({ws_r})))"
+            )
+        joined0 = "\n\t\t, ".join(entries[:16])
+        joined1 = "\n\t\t, ".join(entries[16:])
+        return (
+            f"\t{out0} = mat4(\n\t\t  {joined0}\n\t);\n"
+            f"\t{out1} = mat4(\n\t\t  {joined1}\n\t);"
+        )
+
+    def _output_layer_32(self, a0, a1, w_vals, b_vals, activation, colorspace):
+        """Output layer: input is two mat4s (32 inputs), output is vec3/vec4."""
+        def channel(i):
+            bias = b_vals[i] if i < len(b_vals) else 0.0
+            # left half of weight row i (first 16)
+            dots_l = " + ".join(
+                "dot({a}[{j}], vec4({ws}))".format(
+                    a=a0, j=j,
+                    ws=", ".join(
+                        self._f(w_vals[i*32 + j*4 + k] if i*32 + j*4 + k < len(w_vals) else 0.0)
+                        for k in range(4)
+                    )
+                )
+                for j in range(4)
+            )
+            # right half of weight row i (last 16)
+            dots_r = " + ".join(
+                "dot({a}[{j}], vec4({ws}))".format(
+                    a=a1, j=j,
+                    ws=", ".join(
+                        self._f(w_vals[i*32 + 16 + j*4 + k] if i*32 + 16 + j*4 + k < len(w_vals) else 0.0)
+                        for k in range(4)
+                    )
+                )
+                for j in range(4)
+            )
+            expr = f"{self._f(bias)} + {dots_l} + {dots_r}"
+            if activation == "sine":
+                return f"({expr}) * .5 + .5"
+            else:
+                return f"sigmoid({expr})"
+
+        ch = [channel(i) for i in range(4)]
+        return self._color_return(ch, colorspace)
+
+    # -------------------------------------------------------------------------
+    # shared output formatting
+    # -------------------------------------------------------------------------
+
+    def _color_return(self, ch, colorspace):
         color_decode = ""
         if colorspace == "ycbcr":
             color_decode = "\tcolor = mat3(1, 0, 1.402, 1, -.344136, -.714136, 1, 1.772, 0.) * color;"
@@ -119,8 +224,13 @@ class Translate:
             f"\treturn color;"
         )
 
+    # -------------------------------------------------------------------------
+    # generate
+    # -------------------------------------------------------------------------
+
     def _generate(self, args, names, sizes, values):
-        use_sine = args.activation == "sine"
+        use_sine   = args.activation == "sine"
+        model_size = getattr(args, 'model_size', 16)
 
         helpers = (
             "float relu(float f)   { return max(.0, f); }\n"
@@ -135,20 +245,10 @@ class Translate:
 
         encode = self._encode(args)
 
-        bufs = ["l1", "l2"]
-        nn_body = ["\tmat4 l2, l1 = encode(p);"]
-        for idx, (w_name, b_name) in enumerate(names):
-            a   = bufs[idx % 2]
-            out = bufs[(idx + 1) % 2]
-            w, b = values[w_name], values[b_name]
-            last = idx + 1 == len(names)
-            if last:
-                nn_body.append(self._output_layer(a, w, b, args.activation, args.colorspace))
-            else:
-                fn = ("sine0" if idx == 0 else "sine") if use_sine else "relu"
-                nn_body.append(self._hidden_layer(out, a, w, b, fn))
-
-        nn = "vec3 nn(vec2 p) {\n" + "\n".join(nn_body) + "\n}"
+        if model_size == 32:
+            nn = self._generate_nn_32(args, names, values, use_sine)
+        else:
+            nn = self._generate_nn_16(args, names, values, use_sine)
 
         main = (
             "void mainImage(out vec4 to, in vec2 at) {\n"
@@ -169,6 +269,40 @@ class Translate:
         )
 
         return "\n\n".join([helpers, encode, nn, main])
+
+    def _generate_nn_16(self, args, names, values, use_sine):
+        bufs = ["l1", "l2"]
+        body = ["\tmat4 l2, l1 = encode(p);"]
+        for idx, (w_name, b_name) in enumerate(names):
+            a   = bufs[idx % 2]
+            out = bufs[(idx + 1) % 2]
+            w, b = values[w_name], values[b_name]
+            last = idx + 1 == len(names)
+            if last:
+                body.append(self._output_layer(a, w, b, args.activation, args.colorspace))
+            else:
+                fn = ("sine0" if idx == 0 else "sine") if use_sine else "relu"
+                body.append(self._hidden_layer(out, a, w, b, fn))
+        return "vec3 nn(vec2 p) {\n" + "\n".join(body) + "\n}"
+
+    def _generate_nn_32(self, args, names, values, use_sine):
+        # ping-pong between (l1a,l1b) and (l2a,l2b)
+        bufs = [("l1a", "l1b"), ("l2a", "l2b")]
+        body = ["\tmat4 l2a, l2b, l1b, l1a = encode(p);"]
+        for idx, (w_name, b_name) in enumerate(names):
+            a0, a1   = bufs[idx % 2]
+            out0, out1 = bufs[(idx + 1) % 2]
+            w, b = values[w_name], values[b_name]
+            last = idx + 1 == len(names)
+            fn = ("sine0" if idx == 0 else "sine") if use_sine else "relu"
+            if last:
+                body.append(self._output_layer_32(a0, a1, w, b, args.activation, args.colorspace))
+            elif idx == 0:
+                # first hidden layer: input is single mat4 (16-wide encoding)
+                body.append(self._hidden_layer_32_first(out0, out1, a0, w, b, fn))
+            else:
+                body.append(self._hidden_layer_32(out0, out1, a0, a1, w, b, fn))
+        return "vec3 nn(vec2 p) {\n" + "\n".join(body) + "\n}"
 
 
 if __name__ == "__main__":
