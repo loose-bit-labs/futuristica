@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""ckp-backfill — add __config__ metadata to .npz files that don't have it yet.
+
+Looks for a train.log in the same directory and extracts the settings JSON
+logged by futuristica at startup. Falls back to metatrainer log format.
+
+Usage:
+    bin/ckp-backfill weights.npz [weights2.npz ...]
+    bin/ckp-backfill ~/data/futuristica/training-runs/*/weights.npz
+    bin/ckp-backfill ~/data/futuristica/checkpoints/*.npz
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
+
+import numpy as np
+
+# keys we care about; anything else in the log is ignored
+ARCH_KEYS = {"model_size", "model_count", "coding", "mapping",
+             "colorspace", "activation", "four", "loss_fn", "size"}
+
+LOG_SETTINGS = re.compile(r'settings: ({.+})')
+# s16_c6_q3_huber_ycbcr_polar.npz
+CKP_NAME = re.compile(r's(\d+)_c(\d+)_q(\d+)_(\w+)_(\w+)_(\w+)\.npz$')
+
+
+def parse_log(log_path):
+    with open(log_path) as f:
+        for line in f:
+            m = LOG_SETTINGS.search(line)
+            if m:
+                try:
+                    data = json.loads(m.group(1))
+                    return {k: v for k, v in data.items() if k in ARCH_KEYS}
+                except json.JSONDecodeError:
+                    continue
+    return None
+
+
+def parse_filename(npz_path):
+    m = CKP_NAME.search(os.path.basename(npz_path))
+    if not m:
+        return None
+    return {
+        "model_size":  int(m.group(1)),
+        "model_count": int(m.group(2)),
+        "coding":      int(m.group(3)),
+        "loss_fn":     m.group(4),
+        "colorspace":  m.group(5),
+        "mapping":     m.group(6),
+        "activation":  "sine",
+        "four":        False,
+    }
+
+
+def backfill(npz_path, dry_run=False):
+    weights = np.load(npz_path)
+
+    if '__config__' in weights:
+        config = json.loads(str(weights['__config__']))
+        print(f"skip  {npz_path}  (already has config: {config})")
+        return
+
+    config = None
+
+    log_path = os.path.join(os.path.dirname(npz_path), "train.log")
+    if os.path.exists(log_path):
+        config = parse_log(log_path)
+
+    if config is None:
+        # try sibling .log (meta-train checkpoints: s16_c6_q3_huber_ycbcr_polar.log)
+        log_path = os.path.splitext(npz_path)[0] + ".log"
+        if os.path.exists(log_path):
+            config = parse_filename(npz_path)  # meta logs don't have settings line
+
+    if config is None:
+        config = parse_filename(npz_path)
+
+    if config is None:
+        print(f"SKIP  {npz_path}  (cannot determine config)")
+        return
+
+    print(f"{'dry ' if dry_run else ''}write {npz_path}  {config}")
+    if dry_run:
+        return
+
+    data = dict(weights)
+    data['__config__'] = np.array(json.dumps(config))
+    np.savez(npz_path, **data)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Backfill __config__ metadata into .npz files")
+    p.add_argument("files", nargs="+", help=".npz files to backfill")
+    p.add_argument("--dry-run", "-n", action="store_true", help="show what would be done without writing")
+    args = p.parse_args()
+
+    for path in args.files:
+        backfill(path, dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    main()

@@ -36,7 +36,8 @@ class Futuristica:
         self.parser.add_argument("-g", "--generated",       type=str, default="generated_image.png")
         self.parser.add_argument("-t", "--training",        type=int, default=20)
         self.parser.add_argument("-q", "--coding",          type=int, default=3)
-        self.parser.add_argument("-w", "--ckp",             type=str)
+        self.parser.add_argument("-w", "--checkpoint",        type=str)
+        self.parser.add_argument("--no_load_noise",           action="store_true", help="load checkpoint weights exactly, without perturbation")
         self.parser.add_argument("-s", "--model_size",      type=int, default=16)
         self.parser.add_argument("-c", "--model_count",     type=int, default=4)
         self.parser.add_argument("-l", "--loss_fn",         choices=losers, default="l1")
@@ -48,6 +49,7 @@ class Futuristica:
         self.parser.add_argument("--steps",                 type=int, default=0)
         self.parser.add_argument("-b", "--batch",           type=int, default=32768)
         self.parser.add_argument("--plateau",               type=int, default=0)
+        self.parser.add_argument("--progressive",           action="store_true", help="coarse-to-fine: train at size/4, size/2, then full size")
 
 
     def main(self):
@@ -63,12 +65,21 @@ class Futuristica:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         Futuristica.LOG.info(f"Using device: {self.device}")
 
+        import time
+        t0 = time.time()
+
         coords, colors = self.load_image(self.args.image)
         model = self.train(coords, colors)
 
         self.export_weights(model, self.args.weights)
         self.generate_image(model, self.args.generated)
         self.eval_psnr(model)
+
+        elapsed = int(time.time() - t0)
+        h, rem = divmod(elapsed, 3600)
+        m, s   = divmod(rem, 60)
+        human  = (f"{h}h " if h else "") + (f"{m}m " if m or h else "") + f"{s}s"
+        Futuristica.LOG.info(f"Runtime: {human} ({elapsed}s)")
 
 
     def load_image(self, image_path):
@@ -110,8 +121,28 @@ class Futuristica:
                 torch.tensor(colors, dtype=torch.float32, device=self.device))
 
 
+    def load_image_at_size(self, image_path, size):
+        """Load image at an explicit size, ignoring self.args.size."""
+        orig = self.args.size
+        self.args.size = size
+        result = self.load_image(image_path)
+        self.args.size = orig
+        return result
+
     def train(self, coords, colors):
-        return self.train_back(coords, colors)
+        if not self.args.progressive:
+            return self.train_back(coords, colors)
+
+        full_size = self.args.size
+        total_epochs = 5000 * self.args.training
+        # stages: (fraction_of_total, resolution)
+        stages = [
+            (0.20, max(16, full_size // 4)),
+            (0.30, max(32, full_size // 2)),
+            (0.50, full_size),
+        ]
+        Futuristica.LOG.info(f"Progressive training: {[s[1] for s in stages]} -> {total_epochs} total epochs")
+        return self.train_progressive(stages, total_epochs)
 
 
     def create_model(self, first=True):
@@ -148,11 +179,85 @@ class Futuristica:
         return loss_fns[key]
 
 
+    def train_progressive(self, stages, total_epochs):
+        """Train with coarse-to-fine resolution stages, single continuous optimizer."""
+        model = self.create_model()
+        if self.args.checkpoint and '""' != self.args.checkpoint:
+            model = self.load_weights(model, self.args.checkpoint)
+
+        loss_fn   = self.get_loss_function(self.args.loss_fn)()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs, eta_min=1e-6)
+
+        best_model  = None
+        best_loss   = float('inf')
+        imaged_last = 0
+        imaged_too_soon = 50000
+        use_sine    = self.args.activation == "sine"
+        plateau     = self.args.plateau
+        no_improve  = 0
+
+        epoch = 0
+        for frac, size in stages:
+            stage_epochs = int(total_epochs * frac)
+            coords, colors = self.load_image_at_size(self.args.image, size)
+            n_pixels = coords.shape[0]
+            batch    = min(self.args.batch, n_pixels)
+            best_loss   = float('inf')
+            best_model  = None
+            imaged_last = 0
+            no_improve  = 0
+            Futuristica.LOG.info(f"Progressive stage: size={size}, epochs={stage_epochs}")
+
+            for _ in range(stage_epochs):
+                idx = torch.randperm(n_pixels, device=self.device)[:batch]
+                optimizer.zero_grad()
+                predictions = model(coords[idx])
+                if use_sine:
+                    predictions = (predictions + 1.0) / 2.0
+                loss = loss_fn(predictions, colors[idx])
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+
+                loss_v = loss.item()
+                self.loss_history.append(loss_v)
+
+                if loss_v < best_loss:
+                    best_loss  = loss_v
+                    no_improve = 0
+                    best_model = self.create_model(first=False)
+                    best_model.load_state_dict(model.state_dict())
+                    best_model.cpu()
+                    self.loss_bests.append(best_loss)
+                    if imaged_last == 0 or epoch - imaged_last > imaged_too_soon:
+                        self.generate_image(model, self.args.generated, True)
+                        self.export_weights(model, self.args.weights)
+                        imaged_last = epoch
+                        self.update_plot(epoch)
+                else:
+                    no_improve += 1
+                    if plateau and no_improve >= plateau:
+                        Futuristica.LOG.info(f"Epoch {epoch}: plateau, stopping")
+                        best_model.to(self.device)
+                        return best_model
+
+                if epoch % 1000 == 0:
+                    lr = scheduler.get_last_lr()[0]
+                    self.update_plot(epoch)
+                    Futuristica.LOG.info(f"Epoch {epoch}[{int(epoch*100/total_epochs)}%]: Loss: {loss_v:.6f} vs ({best_loss:.6f}), LR:{lr:.6e}")
+
+                epoch += 1
+
+        Futuristica.LOG.info(f"Training complete: {best_loss:.6f}")
+        best_model.to(self.device)
+        return best_model
+
     def train_back(self, coords, colors):
         model = self.create_model()
 
-        if self.args.ckp and '""' != self.args.ckp:
-            model = self.load_weights(model, self.args.ckp)
+        if self.args.checkpoint and '""' != self.args.checkpoint:
+            model = self.load_weights(model, self.args.checkpoint)
 
         best_model      = None
         best_loss       = float('inf')
@@ -225,10 +330,19 @@ class Futuristica:
 
     def export_weights(self, model, filename="weights.npz"):
         Futuristica.LOG.info(f"Saving weights to {filename}")
-        weights = {}
-        for i, (name, param) in enumerate(model.named_parameters()):
-            weights[name] = param.detach().cpu().numpy()  # Convert to NumPy
-        np.savez(filename, **weights)
+        weights = {name: param.detach().cpu().numpy() for name, param in model.named_parameters()}
+        config = {
+            "model_size":  self.args.model_size,
+            "model_count": self.args.model_count,
+            "coding":      self.args.coding,
+            "mapping":     self.args.mapping,
+            "colorspace":  self.args.colorspace,
+            "activation":  self.args.activation,
+            "four":        self.args.four,
+            "loss_fn":     self.args.loss_fn,
+            "size":        self.args.size,
+        }
+        np.savez(filename, __config__=np.array(json.dumps(config)), **weights)
         Futuristica.LOG.info(f"Saved weights to {filename}")
 
 
@@ -238,13 +352,38 @@ class Futuristica:
             return model
         Futuristica.LOG.info(f"Loading weights from {filename}")
         weights = np.load(filename)
-        noise_scale = .01
+        if '__config__' in weights:
+            config = json.loads(str(weights['__config__']))
+            Futuristica.check_compat(config, self.args, filename)
+        noise_scale = 0.0 if self.args.no_load_noise else 0.01
         for name, param in model.named_parameters():
-            ww = weights[name]
-            ww += np.random.uniform(low=-noise_scale, high=noise_scale, size=ww.shape)
+            ww = weights[name].copy()
+            if noise_scale:
+                ww += np.random.uniform(low=-noise_scale, high=noise_scale, size=ww.shape)
             param.data = torch.from_numpy(ww).to(param.device)
         Futuristica.LOG.info(f"Loaded weights from {filename}")
         return model
+
+    @staticmethod
+    def check_compat(config, args, filename=""):
+        arch_keys = ["model_size", "model_count", "coding", "four"]
+        mismatches = []
+        for k in arch_keys:
+            stored = config.get(k)
+            current = getattr(args, k, None)
+            if stored is not None and current is not None and stored != current:
+                mismatches.append(f"  {k}: checkpoint has {stored!r}, got {current!r}")
+        if mismatches:
+            where = f" ({filename})" if filename else ""
+            raise ValueError(f"Checkpoint architecture mismatch{where}:\n" + "\n".join(mismatches))
+
+    @staticmethod
+    def read_config(filename):
+        """Return the __config__ dict from an npz, or None if not present."""
+        weights = np.load(filename)
+        if '__config__' in weights:
+            return json.loads(str(weights['__config__']))
+        return None
 
 
     def generate_image(self, model, filename = "generated_image.png", timestamp = False):
@@ -544,9 +683,10 @@ class Futuristica:
         last = self.loss_history[-1]
         # Update loss plot
         self.ax_loss.clear()
-        self.ax_loss.set_title(f"Training Loss Over Time: {last}")
+        self.ax_loss.set_title(f"Training Loss Over Time: {last:.6f}")
         self.ax_loss.set_xlabel("Epoch")
-        self.ax_loss.set_ylabel("Loss")
+        self.ax_loss.set_ylabel("Loss (log)")
+        self.ax_loss.set_yscale('log')
         moving_average = np.convolve(self.loss_history, np.ones(10)/10, mode='valid')
         self.ax_loss.plot(moving_average, color='blue', linestyle='--', label='Training Loss')
         self.ax_loss.plot(self.loss_bests, color='green', label="Best Loss")

@@ -3,55 +3,72 @@
 set -e -o pipefail
 
 BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export PYENV_VERSION=$(cat "${BASE}/../.python-version" 2>/dev/null || echo "")
 source "${BASE}/../lib/based.sh"
 
 _run_training_main() {
+	local disable_meta=""
+	[ "${1}" = "--disable-meta-checkpoint" ] && { disable_meta=1; shift; }
+
 	local file=${1:-${BASE}/../images/lenna.png}
 
-	# defaults — override any of these in local.conf
-	local training=20
-	local size=512
-	local colorspace="ycbcr"
-	local loss_fn="l1"
-	local model_size=16
-	local model_count=4
-	local coding=3
-	local extras=""
-	local ckp=""
-	TRAIN_DIR="${TRAIN_DIR:-${BASE}/../run}"
+	source_conf "${BASE}/../local.conf" \
+		TRAIN_DIR CHECKPOINTS_DIR TRAINING SIZE COLORSPACE \
+		LOSS_FN MAPPING MODEL_SIZE MODEL_COUNT CODING EXTRAS CHECKPOINT PROGRESSIVE
 
-	[ -f "${BASE}/../local.conf" ] && source "${BASE}/../local.conf"
+	TRAINING="${TRAINING:-20}"
+	SIZE="${SIZE:-512}"
+	COLORSPACE="${COLORSPACE:-ycbcr}"
+	LOSS_FN="${LOSS_FN:-l1}"
+	MAPPING="${MAPPING:-polar}"
+	MODEL_SIZE="${MODEL_SIZE:-16}"
+	MODEL_COUNT="${MODEL_COUNT:-4}"
+	CODING="${CODING:-3}"
+	EXTRAS="${EXTRAS:-}"
+	CHECKPOINT="${CHECKPOINT:-}"
+	PROGRESSIVE="${PROGRESSIVE:-}"
+	TRAIN_DIR="${TRAIN_DIR:-${BASE}/../run}"
+	CHECKPOINTS_DIR="${CHECKPOINTS_DIR:-}"
 
 	file=$(fullpath ${file})
 	[ -f "${file}" ] || { echo "image not found: ${file}"; return 1; }
 
-	if [ -n "${ckp}" ]; then
-		ckp=$(fullpath ${ckp})
-		[ -f "${ckp}" ] || { echo "checkpoint not found: ${ckp}"; return 2; }
+	local no_load_noise=""
+
+	if [ -n "${CHECKPOINT}" ]; then
+		CHECKPOINT=$(fullpath ${CHECKPOINT})
+		[ -f "${CHECKPOINT}" ] || { echo "checkpoint not found: ${CHECKPOINT}"; return 2; }
+	elif [ -n "${CHECKPOINTS_DIR}" ] && [ -z "${disable_meta}" ]; then
+		local auto_ckp="${CHECKPOINTS_DIR}/s${MODEL_SIZE}_c${MODEL_COUNT}_q${CODING}_${LOSS_FN}_${COLORSPACE}_${MAPPING}.npz"
+		if [ -f "${auto_ckp}" ]; then
+			CHECKPOINT="${auto_ckp}"
+			no_load_noise="--no_load_noise"
+			echo "auto-checkpoint: ${CHECKPOINT}"
+		fi
 	fi
 
 	go_train || return 3
 
 	echo "Starting training"
-	time "${BASE}/futuristica"      \
-		--weights     weights.npz   \
+	time "${BASE}/futuristica"          \
+		--weights     weights.npz       \
 		--generated   images/output.png \
-		--loss_fn     ${loss_fn}    \
-		--coding      ${coding}     \
-		--training    ${training}   \
-		--size        ${size}       \
-		--image       ${file}       \
-		--colorspace  ${colorspace} \
-		--ckp         "${ckp}"      \
-		--model_size  ${model_size} \
-		--model_count ${model_count} \
-		${extras}                   \
+		--loss_fn     ${LOSS_FN}        \
+		--coding      ${CODING}         \
+		--training    ${TRAINING}       \
+		--size        ${SIZE}           \
+		--image       ${file}           \
+		--colorspace  ${COLORSPACE}     \
+		--mapping     ${MAPPING}        \
+		--checkpoint  "${CHECKPOINT}"    \
+		${no_load_noise}                \
+		--model_size  ${MODEL_SIZE}     \
+		--model_count ${MODEL_COUNT}    \
+		${PROGRESSIVE:+--progressive}   \
+		${EXTRAS}                       \
 		2>&1 | tee train.log || return ${?}
 	echo "Training completed"
 
-	# -s flag only works for model_size=16
-	"${BASE}/translate" --coding ${coding} --colorspace ${colorspace} weights.npz > output.glsl
+	"${BASE}/translate" weights.npz > output.glsl
 
 	ls -lathr ./*.*
 	echo "output is in ${PWD}"

@@ -1,5 +1,6 @@
 import argparse
 import copy
+import json
 import glob
 import logging
 import os
@@ -21,7 +22,7 @@ class MetaTrainer:
 
     Trains a starting point theta* such that for any image, K steps of
     gradient descent from theta* reaches a better solution than Sitzmann
-    random init.  The result is a weights.npz drop-in for --ckp.
+    random init.  The result is a weights.npz drop-in for --checkpoint.
 
     Algorithm (Reptile, Nichol et al. 2018):
         theta = sitzmann_init()
@@ -46,7 +47,7 @@ class MetaTrainer:
         p.add_argument("--batch",                 type=int,   default=8118)
         p.add_argument("--size",                  type=int,   default=255,  help="resize images to NxN for meta-training")
         p.add_argument("--save_every",            type=int,   default=212)
-        p.add_argument("--ckp",                   type=str,   help="resume from checkpoint")
+        p.add_argument("--checkpoint",             type=str,   help="resume from checkpoint")
         # architecture — must match the runs you intend to warm-start
         p.add_argument("-s", "--model_size",      type=int,   default=16)
         p.add_argument("-c", "--model_count",     type=int,   default=4)
@@ -55,6 +56,7 @@ class MetaTrainer:
         p.add_argument("-k", "--colorspace",      choices=["rgb", "ycbcr", "yuv"],        default="ycbcr")
         p.add_argument("-a", "--activation",      choices=["sine", "relu", "tanh"],        default="sine")
         p.add_argument("-f", "--four",            action="store_true")
+        p.add_argument("-l", "--loss_fn",         choices=["mse", "huber", "l1"], default="mse")
         self.args = p.parse_args()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -71,9 +73,9 @@ class MetaTrainer:
             raise RuntimeError("provide images_dir or --image_list")
 
         model = self._make_model()
-        if self.args.ckp:
-            self._load(model, self.args.ckp)
-            self.LOG.info(f"resuming from {self.args.ckp}")
+        if self.args.checkpoint:
+            self._load(model, self.args.checkpoint)
+            self.LOG.info(f"resuming from {self.args.checkpoint}")
 
         self._reptile(model, images)
 
@@ -102,7 +104,12 @@ class MetaTrainer:
                 pred  = fast(coords[idx])
                 if args.activation == "sine":
                     pred = (pred + 1.0) / 2.0
-                loss  = F.mse_loss(pred, colors[idx])
+                if args.loss_fn == "huber":
+                    loss = F.huber_loss(pred, colors[idx])
+                elif args.loss_fn == "l1":
+                    loss = F.l1_loss(pred, colors[idx])
+                else:
+                    loss = F.mse_loss(pred, colors[idx])
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
@@ -203,7 +210,19 @@ class MetaTrainer:
         return np.concatenate(parts, axis=-1)
 
     def _save(self, model, path):
-        np.savez(path, **{k: v.detach().cpu().numpy() for k, v in model.named_parameters()})
+        a = self.args
+        config = {
+            "model_size":  a.model_size,
+            "model_count": a.model_count,
+            "coding":      a.coding,
+            "mapping":     a.mapping,
+            "colorspace":  a.colorspace,
+            "activation":  a.activation,
+            "four":        getattr(a, "four", False),
+            "loss_fn":     a.loss_fn,
+        }
+        weights = {k: v.detach().cpu().numpy() for k, v in model.named_parameters()}
+        np.savez(path, __config__=np.array(json.dumps(config)), **weights)
 
     def _load(self, model, path):
         w = np.load(path)

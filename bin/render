@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""render — generate an image from a weights.npz file without training.
+
+If the weights file contains embedded config (written by futuristica or
+meta-train), architecture flags are read from it automatically and you
+only need to specify flags you want to override.
+
+Usage:
+    bin/render weights.npz
+    bin/render weights.npz --output out.png --size 1024
+    bin/render weights.npz --colorspace rgb    # override one field
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
+
+import torch
+from trainer import Futuristica
+
+
+def main():
+    p = argparse.ArgumentParser(description="Render an image from a weights.npz file")
+    p.add_argument("weights",              type=str,               help="path to weights.npz")
+    p.add_argument("--output",    "-o",    type=str, default=None, help="output image path (default: <weights>.png)")
+    p.add_argument("--size",      "-r",    type=int, default=None)
+    p.add_argument("--coding",    "-q",    type=int, default=None)
+    p.add_argument("--mapping",   "-e",    type=str, default=None, choices=["polar", "fourier", "legacy"])
+    p.add_argument("--colorspace","-k",    type=str, default=None, choices=["rgb", "ycbcr", "yuv"])
+    p.add_argument("--activation","-a",    type=str, default=None, choices=["sine", "relu", "tanh"])
+    p.add_argument("--model_size","-s",    type=int, default=None)
+    p.add_argument("--model_count","-c",   type=int, default=None)
+    p.add_argument("--four",      "-f",    action="store_true",    default=None)
+    args = p.parse_args()
+
+    # read embedded config from the npz (may be None for old checkpoints)
+    stored = Futuristica.read_config(args.weights)
+    if stored:
+        print(f"config: {stored}")
+
+    def _resolve(key, fallback):
+        cli = getattr(args, key)
+        if cli is not None:
+            return cli
+        if stored and key in stored:
+            return stored[key]
+        return fallback
+
+    output = args.output or os.path.splitext(args.weights)[0] + ".png"
+
+    class _Args:
+        pass
+    a = _Args()
+    a.size          = _resolve("size",        512)
+    a.coding        = _resolve("coding",      3)
+    a.mapping       = _resolve("mapping",     "polar")
+    a.colorspace    = _resolve("colorspace",  "ycbcr")
+    a.activation    = _resolve("activation",  "sine")
+    a.model_size    = _resolve("model_size",  16)
+    a.model_count   = _resolve("model_count", 4)
+    a.four          = _resolve("four",        False)
+    a.no_load_noise = True
+
+    f = Futuristica.__new__(Futuristica)
+    f.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    f.args = a
+
+    model = f.create_model()
+    model = f.load_weights(model, args.weights)
+    model.eval()
+
+    f.generate_image(model, output)
+    print(f"rendered: {output}")
+
+
+if __name__ == "__main__":
+    main()

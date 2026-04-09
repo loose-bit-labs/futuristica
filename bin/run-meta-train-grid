@@ -1,0 +1,234 @@
+#!/bin/bash
+
+set -e -o pipefail
+
+BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${BASE}/../lib/based.sh"
+
+################################################################################
+# run-meta-train-grid — generate Reptile meta-init checkpoints for a grid of
+# architecture / training-config combinations.
+#
+# Outputs one .npz per combination to $CHECKPOINTS_DIR using the naming scheme:
+#
+#   s{size}_c{count}_q{coding}_{loss}_{colorspace}_{encoding}.npz
+#
+#   e.g.  s16_c6_q3_huber_ycbcr_polar.npz
+#
+# These checkpoints are drop-in warm-starts for --checkpoint in futuristica training.
+# The architecture flags (size, count, coding) MUST match between checkpoint
+# and training run — the others (loss, colorspace, encoding) affect quality of
+# the init but not loadability.
+#
+# Usage:
+#   ./bin/run-meta-train-grid                   # priority set, 2002 steps each
+#   OUTER_STEPS=200 ./bin/run-meta-train-grid   # quick smoke-test
+#
+# Override defaults via local.conf (gitignored):
+#   CHECKPOINTS_DIR=/your/path
+#   CONCURRENCY=4
+#   OUTER_STEPS=5000
+#   IMAGE_LIST=/path/to/list.txt
+#
+# ----------------------------------------------------------------------------
+# PRIORITY SET (what this script trains by default)
+# Chosen from grid-run results (grid-20260407-160158): huber+ycbcr dominated,
+# polar vs fourier too close to skip either, mse kept as common fallback.
+#
+#   loss:       huber mse
+#   colorspace: ycbcr
+#   encoding:   polar fourier
+#   count:      4 6 8
+#   → 2 × 1 × 2 × 3 = 12 checkpoints
+#
+# ----------------------------------------------------------------------------
+# NOT TRAINED HERE (volunteers welcome — use meta-train directly)
+#
+# colorspace: rgb   — consistently ~2× higher loss than ycbcr in grid runs
+#             yuv   — not yet benchmarked; structurally similar to ycbcr
+# loss:       l1    — clearly worst in grid runs; huber/mse cover this range
+# encoding:   legacy — not benchmarked in grid runs
+# model_size: 8 32 64 — only 16 explored so far
+# coding:     0 1 2 4  — only 3 explored so far
+# --four      (4-channel / RGBA output variant)
+# activation: relu tanh — sine (SIREN) is the only one meta-trained so far
+################################################################################
+
+# source local.conf first so env-provided overrides (VAR=val ./script) take
+# precedence — source_conf must be called before any default assignments
+source_conf "${BASE}/../local.conf" \
+    CONCURRENCY OUTER_STEPS SAVE_EVERY MODEL_SIZE CODING \
+    LOSS_FNS COLORSPACES MAPPINGS MODEL_COUNTS \
+    CHECKPOINTS_DIR RUN_DIR IMAGE_LIST
+
+# defaults — applied only if not set by local.conf or env
+CONCURRENCY="${CONCURRENCY:-2}"
+OUTER_STEPS="${OUTER_STEPS:-2002}"
+SAVE_EVERY="${SAVE_EVERY:-500}"
+MODEL_SIZE="${MODEL_SIZE:-16}"
+CODING="${CODING:-3}"
+LOSS_FNS="${LOSS_FNS:-huber mse}"
+COLORSPACES="${COLORSPACES:-ycbcr}"
+MAPPINGS="${MAPPINGS:-polar fourier}"
+MODEL_COUNTS="${MODEL_COUNTS:-4 6 8}"
+CHECKPOINTS_DIR="${CHECKPOINTS_DIR:-}"
+RUN_DIR="${RUN_DIR:-}"
+IMAGE_LIST="${IMAGE_LIST:-}"
+
+# infer CHECKPOINTS_DIR from RUN_DIR if not set
+if [ -z "${CHECKPOINTS_DIR}" ]; then
+    if [ -n "${RUN_DIR}" ]; then
+        CHECKPOINTS_DIR="$(dirname "${RUN_DIR}")/checkpoints"
+    else
+        CHECKPOINTS_DIR="${BASE}/../data/checkpoints"
+    fi
+fi
+
+if [ -z "${IMAGE_LIST}" ]; then
+    # try the tmp-list.txt the meta-train smoke-test uses
+    IMAGE_LIST="${BASE}/../tmp-list.txt"
+fi
+
+if [ ! -f "${IMAGE_LIST}" ]; then
+    echo "ERROR: IMAGE_LIST not found: ${IMAGE_LIST}"
+    echo "Set IMAGE_LIST in local.conf or as an environment variable."
+    exit 1
+fi
+
+META_TRAIN="${BASE}/meta-train"
+
+################################################################################
+
+_main() {
+    local force=0
+    [ "${1}" = "--force" ] && { force=1; shift; }
+
+    mkdir -p "${CHECKPOINTS_DIR}"
+    local stats="${CHECKPOINTS_DIR}/stats.tsv"
+    [ -f "${stats}" ] || printf 'timestamp\tname\tsteps\tduration_s\ts_per_step\n' > "${stats}"
+
+    local trials=()
+    for loss in ${LOSS_FNS}; do
+        for cs in ${COLORSPACES}; do
+            for enc in ${MAPPINGS}; do
+                for count in ${MODEL_COUNTS}; do
+                    trials+=("${loss}|${cs}|${enc}|${count}")
+                done
+            done
+        done
+    done
+
+    local total=${#trials[@]}
+    echo "Meta-train grid: ${total} checkpoints, concurrency ${CONCURRENCY}"
+    echo "Output: ${CHECKPOINTS_DIR}/"
+    echo "Steps per checkpoint: ${OUTER_STEPS}"
+    echo ""
+
+    local running=0
+    local pids=()
+    local names=()
+    local start_times=()
+
+    for trial in "${trials[@]}"; do
+        while [ "${running}" -ge "${CONCURRENCY}" ]; do
+            _reap_one pids names start_times "${stats}"
+            running=${#pids[@]}
+        done
+
+        IFS='|' read -r loss cs enc count <<< "${trial}"
+        local name="s${MODEL_SIZE}_c${count}_q${CODING}_${loss}_${cs}_${enc}"
+        local out="${CHECKPOINTS_DIR}/${name}.npz"
+
+        if [ -f "${out}" ] && [ "${force}" -eq 1 ]; then
+            echo "[restart] ${name}"
+        elif [ -f "${out}" ]; then
+            echo "[resume] ${name}"
+        else
+            echo "[start] ${name}"
+        fi
+
+        _run_one "${out}" "${loss}" "${cs}" "${enc}" "${count}" "${force}" \
+            > "${CHECKPOINTS_DIR}/${name}.log" 2>&1 &
+
+        pids+=($!)
+        names+=("${name}")
+        start_times+=("$(date +%s)")
+        running=${#pids[@]}
+    done
+
+    while [ "${#pids[@]}" -gt 0 ]; do
+        _reap_one pids names start_times "${stats}"
+    done
+
+    echo ""
+    echo "Done. Checkpoints in ${CHECKPOINTS_DIR}/"
+    echo ""
+    echo "Timing stats (${stats}):"
+    column -t "${stats}"
+}
+
+_run_one() {
+    local out=$1
+    local loss=$2
+    local cs=$3
+    local enc=$4
+    local count=$5
+    local force=$6
+
+    local ckp_arg=""
+    [ -f "${out}" ] && [ "${force}" -eq 0 ] && ckp_arg="--checkpoint ${out}"
+
+    "${META_TRAIN}"                        \
+        --image_list  "${IMAGE_LIST}"      \
+        --outer_steps "${OUTER_STEPS}"     \
+        --save_every  "${SAVE_EVERY}"      \
+        --output      "${out}"             \
+        --model_size  "${MODEL_SIZE}"      \
+        --model_count "${count}"           \
+        --coding      "${CODING}"          \
+        --loss_fn     "${loss}"            \
+        --colorspace  "${cs}"              \
+        --mapping     "${enc}"             \
+        ${ckp_arg}
+}
+
+_reap_one() {
+    local -n _pids=$1
+    local -n _names=$2
+    local -n _starts=$3
+    local _stats=$4
+
+    while true; do
+        local i
+        for i in "${!_pids[@]}"; do
+            if ! kill -0 "${_pids[$i]}" 2>/dev/null; then
+                local name=${_names[$i]}
+                local t0=${_starts[$i]}
+                local status="done"
+                wait "${_pids[$i]}" 2>/dev/null || status="FAILED"
+
+                local t1
+                t1=$(date +%s)
+                local dur=$(( t1 - t0 ))
+                local sps
+                sps=$(awk "BEGIN { printf \"%.2f\", ${OUTER_STEPS} / ${dur} }" 2>/dev/null || echo "?")
+
+                echo "[${status}] ${name}  ${dur}s  (~${sps} steps/s)"
+                printf '%s\t%s\t%d\t%d\t%s\n' \
+                    "$(date -Iseconds)" "${name}" "${OUTER_STEPS}" "${dur}" "${sps}" \
+                    >> "${_stats}"
+
+                unset '_pids[$i]'
+                unset '_names[$i]'
+                unset '_starts[$i]'
+                _pids=("${_pids[@]}")
+                _names=("${_names[@]}")
+                _starts=("${_starts[@]}")
+                return
+            fi
+        done
+        sleep 5
+    done
+}
+
+_main "$@"
