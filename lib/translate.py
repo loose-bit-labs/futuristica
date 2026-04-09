@@ -23,8 +23,10 @@ class Translate:
             if not args.colorspace and 'colorspace' in cfg: args.colorspace = cfg['colorspace']
             if not args.activation and 'activation' in cfg: args.activation = cfg['activation']
             args.model_size = cfg.get('model_size', 16)
+            args.four       = cfg.get('four', False)
         else:
             args.model_size = 16
+            args.four       = False
 
         names, sizes, values = self._load(data)
         print(self._generate(args, names, sizes, values))
@@ -95,7 +97,7 @@ class Translate:
         joined = "\n\t\t, ".join(entries)
         return f"\t{out} = mat4(\n\t\t  {joined}\n\t);"
 
-    def _output_layer(self, a, w_vals, b_vals, activation, colorspace):
+    def _output_layer(self, a, w_vals, b_vals, activation, colorspace, four=False):
         def channel(i):
             bias = b_vals[i] if i < len(b_vals) else 0.0
             dots = " + ".join(
@@ -115,7 +117,7 @@ class Translate:
                 return f"sigmoid({expr})"
 
         ch = [channel(i) for i in range(4)]
-        return self._color_return(ch, colorspace)
+        return self._color_return(ch, colorspace, four)
 
     # -------------------------------------------------------------------------
     # model_size = 32 — two mat4s per layer (a0/a1, b0/b1)
@@ -163,7 +165,7 @@ class Translate:
             f"\t{out1} = mat4(\n\t\t  {joined1}\n\t);"
         )
 
-    def _output_layer_32(self, a0, a1, w_vals, b_vals, activation, colorspace):
+    def _output_layer_32(self, a0, a1, w_vals, b_vals, activation, colorspace, four=False):
         """Output layer: input is two mat4s (32 inputs), output is vec3/vec4."""
         def channel(i):
             bias = b_vals[i] if i < len(b_vals) else 0.0
@@ -196,32 +198,39 @@ class Translate:
                 return f"sigmoid({expr})"
 
         ch = [channel(i) for i in range(4)]
-        return self._color_return(ch, colorspace)
+        return self._color_return(ch, colorspace, four)
 
     # -------------------------------------------------------------------------
     # shared output formatting
     # -------------------------------------------------------------------------
 
-    def _color_return(self, ch, colorspace):
+    def _color_return(self, ch, colorspace, four=False):
         color_decode = ""
         if colorspace == "ycbcr":
             color_decode = "\tcolor = mat3(1, 0, 1.402, 1, -.344136, -.714136, 1, 1.772, 0.) * color;"
         elif colorspace == "yuv":
             color_decode = "\tcolor = mat3(1, 0, 1.13983, 1, -.39465, -.58060, 1, 2.03211, 0) * color;"
 
-        grayed = "\tfloat grayed = kolor.a / ((color.r + color.g + color.b) / 3.);\n\tcolor *= grayed;"
+        if four:
+            # 4th channel encodes a luminance ratio — apply it
+            grayed = "\tfloat grayed = kolor.a / ((color.r + color.g + color.b) / 3.);\n\tcolor *= grayed;"
+            alpha_line = f"\t\t, {ch[3]}\n"
+            after_decode = f"{grayed}\n"
+        else:
+            alpha_line = ""
+            after_decode = ""
 
         return (
             f"\tvec4 kolor = vec4(\n"
             f"\t\t  {ch[0]}\n"
             f"\t\t, {ch[1]}\n"
             f"\t\t, {ch[2]}\n"
-            f"\t\t, {ch[3]}\n"
+            f"{alpha_line}"
             f"\t);\n"
             f"\tvec3 color = kolor.rgb;\n"
             + (f"{color_decode}\n" if color_decode else "")
-            + f"{grayed}\n"
-            f"\treturn color;"
+            + after_decode
+            + f"\treturn color;"
         )
 
     # -------------------------------------------------------------------------
@@ -279,7 +288,7 @@ class Translate:
             w, b = values[w_name], values[b_name]
             last = idx + 1 == len(names)
             if last:
-                body.append(self._output_layer(a, w, b, args.activation, args.colorspace))
+                body.append(self._output_layer(a, w, b, args.activation, args.colorspace, getattr(args, 'four', False)))
             else:
                 fn = ("sine0" if idx == 0 else "sine") if use_sine else "relu"
                 body.append(self._hidden_layer(out, a, w, b, fn))
@@ -296,7 +305,7 @@ class Translate:
             last = idx + 1 == len(names)
             fn = ("sine0" if idx == 0 else "sine") if use_sine else "relu"
             if last:
-                body.append(self._output_layer_32(a0, a1, w, b, args.activation, args.colorspace))
+                body.append(self._output_layer_32(a0, a1, w, b, args.activation, args.colorspace, getattr(args, 'four', False)))
             elif idx == 0:
                 # first hidden layer: input is single mat4 (16-wide encoding)
                 body.append(self._hidden_layer_32_first(out0, out1, a0, w, b, fn))
