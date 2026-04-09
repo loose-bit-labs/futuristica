@@ -220,8 +220,9 @@ class Translate:
             alpha_line = ""
             after_decode = ""
 
+        kolor_type = "vec4" if four else "vec3"
         return (
-            f"\tvec4 kolor = vec4(\n"
+            f"\t{kolor_type} kolor = {kolor_type}(\n"
             f"\t\t  {ch[0]}\n"
             f"\t\t, {ch[1]}\n"
             f"\t\t, {ch[2]}\n"
