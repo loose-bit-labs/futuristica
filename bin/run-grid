@@ -159,11 +159,7 @@ _run_trial() {
         ${EXTRAS}
 
     # translate weights to GLSL
-    "${TRANSLATE}" -s               \
-        --coding "${CODING}"        \
-        --colorspace "${colorspace}" \
-        --mapping "${mapping}"      \
-        weights.npz > output.glsl
+    "${TRANSLATE}" -s weights.npz > output.glsl
 
     cd - > /dev/null
 }

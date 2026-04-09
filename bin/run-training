@@ -68,7 +68,7 @@ _run_training_main() {
 		2>&1 | tee train.log || return ${?}
 	echo "Training completed"
 
-	"${BASE}/translate" --coding ${CODING} --colorspace ${COLORSPACE} weights.npz > output.glsl
+	"${BASE}/translate" weights.npz > output.glsl
 
 	ls -lathr ./*.*
 	echo "output is in ${PWD}"
