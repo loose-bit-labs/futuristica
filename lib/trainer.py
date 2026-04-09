@@ -683,9 +683,10 @@ class Futuristica:
         last = self.loss_history[-1]
         # Update loss plot
         self.ax_loss.clear()
-        self.ax_loss.set_title(f"Training Loss Over Time: {last}")
+        self.ax_loss.set_title(f"Training Loss Over Time: {last:.6f}")
         self.ax_loss.set_xlabel("Epoch")
-        self.ax_loss.set_ylabel("Loss")
+        self.ax_loss.set_ylabel("Loss (log)")
+        self.ax_loss.set_yscale('log')
         moving_average = np.convolve(self.loss_history, np.ones(10)/10, mode='valid')
         self.ax_loss.plot(moving_average, color='blue', linestyle='--', label='Training Loss')
         self.ax_loss.plot(self.loss_bests, color='green', label="Best Loss")

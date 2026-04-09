@@ -112,7 +112,7 @@ new Chart(document.getElementById('chart'), {{
         scales: {{
             x: {{ type: 'linear', title: {{ display: true, text: 'epoch', color: '#888' }},
                   ticks: {{ color: '#666' }}, grid: {{ color: '#222' }} }},
-            y: {{ title: {{ display: true, text: 'loss', color: '#888' }},
+            y: {{ type: 'logarithmic', title: {{ display: true, text: 'loss (log)', color: '#888' }},
                   ticks: {{ color: '#666' }}, grid: {{ color: '#222' }} }},
         }},
         plugins: {{
