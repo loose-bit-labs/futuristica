@@ -85,7 +85,7 @@ _main() {
     for trial in "${trials[@]}"; do
         # wait if at concurrency limit
         while [ "${running}" -ge "${CONCURRENCY}" ]; do
-            _reap_one pids trial_dirs results
+            _reap_one pids trial_dirs "${results}"
             running=${#pids[@]}
         done
 
@@ -109,7 +109,7 @@ _main() {
 
     # drain remaining
     while [ "${#pids[@]}" -gt 0 ]; do
-        _reap_one pids trial_dirs results
+        _reap_one pids trial_dirs "${results}"
     done
 
     echo ""
@@ -117,10 +117,16 @@ _main() {
     cat "${results}"
     echo ""
 
-    # find best
+    # find best by loss
     local best
     best=$(grep -v '^trial\|^─' "${results}" | sort -k2 -n | head -1)
-    echo "Best: ${best}"
+    echo "Best (loss): ${best}"
+
+    # PSNR ranking
+    echo ""
+    echo "PSNR ranking:"
+    awk '/Eval PSNR:/ {sub(/\/train\.log$/, "", FILENAME); sub(/.*\//, "", FILENAME); print $NF " " FILENAME}' \
+        "${grid_dir}"/*/train.log | sort -rn
 
     "${BASE}/grid-html-maker" "${grid_dir}"
 }
