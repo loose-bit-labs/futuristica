@@ -93,7 +93,7 @@ class Translate:
         for i in range(16):
             bias = b_vals[i] if i < len(b_vals) else 0.0
             ws   = ", ".join(
-                self._f(w_vals[i*16 + j*4 + k] if i*16 + j*4 + k < len(w_vals) else 0.0, 4)
+                self._f(w_vals[i*16 + j*4 + k] if i*16 + j*4 + k < len(w_vals) else 0.0)
                 for j in range(4) for k in range(4)
             )
             entries.append(f"{fn}({self._f(bias)} + layeriate({a}, mat4({ws})))")
@@ -133,7 +133,7 @@ class Translate:
             bias = b_vals[i] if i < len(b_vals) else 0.0
             # weight row i: 16 values (input is 16-wide)
             ws = ", ".join(
-                self._f(w_vals[i*16 + j*4 + k] if i*16 + j*4 + k < len(w_vals) else 0.0, 4)
+                self._f(w_vals[i*16 + j*4 + k] if i*16 + j*4 + k < len(w_vals) else 0.0)
                 for j in range(4) for k in range(4)
             )
             entries.append(f"{fn}({self._f(bias)} + layeriate({a0}, mat4({ws})))")
@@ -151,11 +151,11 @@ class Translate:
             bias = b_vals[i] if i < len(b_vals) else 0.0
             # weight row i: 32 values split into left (first 16) and right (last 16)
             ws_l = ", ".join(
-                self._f(w_vals[i*32 + j*4 + k] if i*32 + j*4 + k < len(w_vals) else 0.0, 4)
+                self._f(w_vals[i*32 + j*4 + k] if i*32 + j*4 + k < len(w_vals) else 0.0)
                 for j in range(4) for k in range(4)
             )
             ws_r = ", ".join(
-                self._f(w_vals[i*32 + 16 + j*4 + k] if i*32 + 16 + j*4 + k < len(w_vals) else 0.0, 4)
+                self._f(w_vals[i*32 + 16 + j*4 + k] if i*32 + 16 + j*4 + k < len(w_vals) else 0.0)
                 for j in range(4) for k in range(4)
             )
             entries.append(
