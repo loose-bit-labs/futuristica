@@ -8,6 +8,7 @@ class Translate:
         parser = argparse.ArgumentParser(description="Translate weights to GLSL")
         parser.add_argument('filename')
         parser.add_argument("-s", "--silent",     action="store_true")
+        parser.add_argument("-p", "--precision",  type=int, default=4, help="decimal digits for weights (default: 4)")
         parser.add_argument("-c", "--coding",     type=int, default=3)
         parser.add_argument("-e", "--mapping",    choices=["polar", "fourier", "legacy"], default="polar")
         parser.add_argument("-k", "--colorspace", choices=["rgb", "ycbcr", "yuv"], default="ycbcr")
@@ -29,6 +30,7 @@ class Translate:
             args.four       = False
 
         names, sizes, values = self._load(data)
+        self.precision = args.precision
         print(self._generate(args, names, sizes, values))
 
     def _load(self, data):
@@ -49,8 +51,9 @@ class Translate:
                 names.append(current)
         return names, sizes, values
 
-    def _f(self, x, digits=2):
-        return f"{x:.{digits}f}".replace("0.", ".")
+    def _f(self, x, digits=None):
+        d = digits if digits is not None else getattr(self, 'precision', 4)
+        return f"{x:.{d}f}".replace("0.", ".")
 
     def _encode(self, args):
         L = args.coding
